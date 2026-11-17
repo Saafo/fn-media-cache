@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FN Media Cache · 飞牛影视本地缓存服务</title>
+  <style>
+    :root{color-scheme:light dark;font-family:system-ui,-apple-system,sans-serif;background:#12161c;color:#e7edf5}
+    body{max-width:1100px;margin:48px auto;padding:0 24px}h1{font-size:30px;margin-bottom:8px}h2{font-size:19px;margin-top:32px}
+    .muted{color:#a4b0c0;font-size:14px;line-height:1.7}.panel{background:#1c232c;border:1px solid #344051;border-radius:12px;padding:20px;margin:20px 0}
+    input,textarea{background:#10151c;color:#e7edf5;border:1px solid #4b5c72;border-radius:6px;padding:10px;width:min(420px,75%)}
+    button{background:#b9d8ff;color:#102036;border:0;border-radius:6px;padding:9px 14px;cursor:pointer;margin:4px}
+    button:disabled{opacity:.45;cursor:default}.metrics{display:flex;flex-wrap:wrap;gap:24px}.metric b{display:block;font-size:24px;margin-top:4px}
+    table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;border-bottom:1px solid #344051;padding:12px 6px;overflow-wrap:anywhere}th{color:#a4b0c0;font-weight:500}
+    .path{max-width:420px}#message{min-height:24px;color:#ffd499}progress{width:140px}a{color:#b9d8ff}code{font-size:13px}
+    .settings{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:18px;margin:20px 0}.settings label{display:flex;flex-direction:column;gap:7px;font-size:14px}.settings input{width:150px}input[type=checkbox]{width:auto;accent-color:#b9d8ff}select{background:#10151c;color:#e7edf5;border:1px solid #4b5c72;padding:10px;border-radius:6px;max-width:100%}.toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}summary{cursor:pointer}#catalog-status{min-height:24px}
+    @media(max-width:700px){body{margin-top:24px;padding:0 14px}table{font-size:12px}.path{max-width:160px}.panel{padding:12px}}
+  </style>
+  <script src="/app.js" defer></script>
+  <script src="/desktop.js" defer></script>
+</head>
+<body>
+  <h1>FN Media Cache</h1>
+  <p class="muted">飞牛影视本地缓存服务 · 测试版，关闭此页面不会停止任务。</p>
+  <section class="panel" id="desktop-panel" hidden>
+    <div class="toolbar"><strong id="desktop-status">正在检查后台…</strong><button id="service-start">启动后台</button><button id="service-stop">停止后台</button><button id="service-logs">打开日志目录</button></div>
+    <details id="server-settings"><summary>服务器与启动设置</summary>
+      <div class="settings">
+        <label>主服务器地址<input id="server-origin" placeholder="http://服务器:端口"></label>
+        <label>备用地址（每行一个）<textarea id="server-alternates" rows="3"></textarea></label>
+        <label>代理端口<input type="number" id="server-port" min="1" max="65535"></label>
+        <label><span><input type="checkbox" id="server-lan"> 允许局域网播放器连接</span></label>
+        <label><span><input type="checkbox" id="server-autostart"> 登录系统后启动后台</span></label>
+        <label>单个日志上限（MiB）<input type="number" id="server-log-size" min="1" max="1024"></label>
+        <label>保留历史日志数<input type="number" id="server-log-keep" min="1" max="20"></label>
+      </div>
+      <p class="muted">切换主服务器会使用独立缓存目录，原缓存保留。保存会重启后台。关闭窗口收起到托盘，退出桌面程序也不会停止后台。</p>
+      <button id="server-save">保存并启动</button><span id="server-message" class="muted"></span>
+    </details>
+  </section>
+  <div class="panel" id="login"><label for="token">管理令牌</label><br><br><input id="token" type="password" autocomplete="off" placeholder="粘贴 data/admin-token 中的内容"><button id="connect">连接</button><p class="muted">令牌只留在当前页面内存中。服务启动时会显示令牌文件位置。</p></div>
+  <p id="message" role="status"></p>
+  <div id="content" hidden>
+    <p class="panel" id="privacy-banner" hidden>无痕模式已开启：观看上报不发往上游，不记录本地播放进度，不新增自动预取。登录和视频请求仍会访问上游。</p>
+    <div class="panel metrics" id="metrics"></div>
+    <h2>选择影片或剧集</h2>
+    <div class="toolbar"><select id="session" aria-label="登录会话"></select><input id="search-query" placeholder="搜索片名或剧名" maxlength="200"><button id="search">搜索</button><button id="library-root">媒体库</button><button id="catalog-back">返回</button></div>
+    <p class="muted" id="catalog-status"></p>
+    <table><thead><tr><th>选择</th><th>名称</th><th>类型 / 集数</th><th>操作</th></tr></thead><tbody id="catalog"></tbody></table>
+    <div class="toolbar"><button id="catalog-prev">上一页</button><span id="catalog-page"></span><button id="catalog-next">下一页</button><button id="download-selection">下载选中项（0）</button></div>
+    <details class="panel"><summary>下载与清理设置</summary>
+      <p class="muted">设置保存后立即生效。自动预取默认关闭；启用后根据播放器上报的当前剧集预取后续集数。清理只删除本机缓存。</p>
+      <div class="settings">
+        <label><span><input type="checkbox" id="incognito"> 无痕观看（影响此代理的所有播放器）</span></label>
+        <label><span><input type="checkbox" id="auto-prefetch"> 自动预取后续剧集</span></label>
+        <label>预取集数<input type="number" id="prefetch-count" min="1" max="20" step="1"></label>
+        <label>下载限速（MiB/s，0 为不限速）<input type="number" id="rate-limit" min="0" max="1024" step="0.25"></label>
+        <label><span><input type="checkbox" id="pause-playing"> 播放器读取视频时暂停后台下载</span></label>
+        <label>播放结束后等待（秒）<input type="number" id="playback-cooldown" min="0" max="3600" step="1"></label>
+        <label>缓存空间上限（GiB）<input type="number" id="cache-limit" min="0.01" step="any"></label>
+        <label>磁盘预留空间（MiB）<input type="number" id="disk-reserve" min="0" step="64"></label>
+        <label><span><input type="checkbox" id="cleanup-enabled"> 看完后自动清理缓存</span></label>
+        <label>看完后保留（小时，0 可立即清理）<input type="number" id="retention-hours" min="0" max="8760" step="0.25"></label>
+        <label>调度检查间隔（秒）<input type="number" id="scheduler-interval" min="1" max="3600" step="1"></label>
+        <label>线路测速结果有效期（分钟）<input type="number" id="route-ttl" min="0.5" max="1440" step="0.5"></label>
+        <label>每条线路测速超时（秒）<input type="number" id="route-timeout" min="1" max="120" step="1"></label>
+        <label>每条线路测速样本（KiB）<input type="number" id="route-sample" min="1" max="1024" step="1"></label>
+        <label>自动重试次数（0 为关闭）<input type="number" id="retry-count" min="0" max="100"></label>
+        <label>首次重试等待（秒）<input type="number" id="retry-base" min="1" max="86400"></label>
+        <label>重试最长等待（秒）<input type="number" id="retry-max" min="1" max="86400"></label>
+        <label>会话检查间隔（秒）<input type="number" id="session-check" min="1" max="3600"></label>
+        <label>恢复检测阈值（秒）<input type="number" id="resume-threshold" min="1" max="3600"></label>
+      </div><p class="muted">无痕不会删除已有观看历史。关闭无痕前先退出当前播放页，避免客户端之后补报缓存在内存中的进度。</p><button id="save-settings">保存设置</button><span class="muted" id="settings-state"></span>
+    </details>
+    <h2>下载线路 <button id="probe-routes">重新测速</button></h2>
+    <p class="muted" id="route-summary">等待视频请求。登录和观看记录仍走主地址。</p>
+    <table><thead><tr><th>地址</th><th>状态</th><th>样本速度</th><th>样本耗时</th></tr></thead><tbody id="routes"></tbody></table>
+    <h2>最近经过代理的请求</h2>
+    <p class="muted">先让播放器经过代理播放一次，再选择样本缓存或完整下载。样本缓存最多读取 3 MiB，不会下载整部。列表隐藏查询参数和认证头。</p>
+    <table><thead><tr><th>路径</th><th>响应</th><th>大小</th><th>操作</th></tr></thead><tbody id="observations"></tbody></table>
+    <h2>下载与缓存</h2>
+    <p class="muted" id="download-status">仅一个后台下载并发。缓存命中前仍会向上游校验权限和文件版本。</p>
+    <p class="muted">“本地标记看完”只影响缓存清理，不改上游观看记录；“保留”会阻止自动清理。已清理的集不会再次自动预取，仍可手动重新下载。</p>
+    <table><thead><tr><th>路径</th><th>状态</th><th>进度</th><th>操作</th></tr></thead><tbody id="downloads"></tbody></table>
+  </div>
+</body>
+</html>

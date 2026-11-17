@@ -1,0 +1,15 @@
+# Replace with your upstream origin, without a path, username or password.
+upstream = "https://media.example.com"
+# Additional HTTP(S) origins for the SAME server. Credentials are sent to these origins.
+# Only background native FN downloads use them; login and progress keep using upstream.
+upstream_alternates = []
+# Use 0.0.0.0:28005 only when you are ready to connect a TV on your LAN.
+proxy_listen = "127.0.0.1:28005"
+# The management page is intentionally restricted to this computer.
+admin_listen = "127.0.0.1:28006"
+data_dir = "data"
+max_cache_bytes = 21474836480
+read_timeout_seconds = 30
+# Current log plus this many rotated files, inside data/logs.
+log_max_bytes = 8388608
+log_keep_files = 3
