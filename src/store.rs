@@ -22,6 +22,7 @@ pub struct Download {
     pub content_type: Option<String>,
     pub file_version: Option<String>,
     pub attempts: u32,
+    pub queue_order: i64,
     pub retry_at: Option<i64>,
     pub failure_kind: Option<String>,
     #[serde(skip)]
@@ -87,6 +88,13 @@ impl Store {
                 )?;
             }
         }
+        if !columns.iter().any(|column| column == "queue_order") {
+            db.execute(
+                "ALTER TABLE downloads ADD COLUMN queue_order INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+            db.execute("UPDATE downloads SET queue_order=rowid", [])?;
+        }
         let missing: Vec<(String, String)> = db
             .prepare("SELECT id,source FROM downloads WHERE cache_key IS NULL")?
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
@@ -137,7 +145,7 @@ impl Store {
 
     pub fn list(&self) -> Result<Vec<Download>> {
         let db = self.db.lock().unwrap();
-        let mut statement = db.prepare("SELECT id,path,state,downloaded,total,error,etag,last_modified,content_type,source,file_version,attempts,retry_at,failure_kind FROM downloads ORDER BY created_at,id")?;
+        let mut statement = db.prepare("SELECT id,path,state,downloaded,total,error,etag,last_modified,content_type,source,file_version,attempts,retry_at,failure_kind,queue_order FROM downloads ORDER BY queue_order,id")?;
         let rows = statement.query_map([], Self::row)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
@@ -159,6 +167,7 @@ impl Store {
             content_type: row.get(8)?,
             file_version: row.get(10)?,
             attempts: row.get(11)?,
+            queue_order: row.get(14)?,
             retry_at: row.get(12)?,
             failure_kind: row.get(13)?,
             source,
@@ -167,7 +176,7 @@ impl Store {
 
     pub fn get(&self, id: &str) -> Result<Option<Download>> {
         Ok(self.db.lock().unwrap().query_row(
-            "SELECT id,path,state,downloaded,total,error,etag,last_modified,content_type,source,file_version,attempts,retry_at,failure_kind FROM downloads WHERE id=?1",
+            "SELECT id,path,state,downloaded,total,error,etag,last_modified,content_type,source,file_version,attempts,retry_at,failure_kind,queue_order FROM downloads WHERE id=?1",
             [id], Self::row,
         ).optional()?)
     }
@@ -186,7 +195,7 @@ impl Store {
             return Ok(id);
         }
         db.execute(
-            "INSERT OR IGNORE INTO downloads(id,path,source,state,cache_key,account_key) VALUES (?1,?2,?3,?4,?5,?6)",
+            "INSERT OR IGNORE INTO downloads(id,path,source,state,cache_key,account_key,queue_order) VALUES (?1,?2,?3,?4,?5,?6,(SELECT COALESCE(MAX(queue_order),0)+1 FROM downloads))",
             params![id, source.display_path(), serde_json::to_string(source)?, if paused { "paused" } else { "queued" }, cache_key,account],
         )?;
         Ok(id)
@@ -194,7 +203,7 @@ impl Store {
 
     pub fn get_for_source(&self, source: &Source) -> Result<Option<Download>> {
         Ok(self.db.lock().unwrap().query_row(
-            "SELECT id,path,state,downloaded,total,error,etag,last_modified,content_type,source,file_version,attempts,retry_at,failure_kind FROM downloads WHERE cache_key=?1 ORDER BY state='complete' DESC,created_at DESC LIMIT 1",
+            "SELECT id,path,state,downloaded,total,error,etag,last_modified,content_type,source,file_version,attempts,retry_at,failure_kind,queue_order FROM downloads WHERE cache_key=?1 ORDER BY state='complete' DESC,created_at DESC LIMIT 1",
             [source.cache_id()], Self::row,
         ).optional()?)
     }
@@ -202,7 +211,7 @@ impl Store {
     pub fn next(&self) -> Result<Option<Download>> {
         let db = self.db.lock().unwrap();
         let item = db.query_row(
-            "SELECT id,path,state,downloaded,total,error,etag,last_modified,content_type,source,file_version,attempts,retry_at,failure_kind FROM downloads WHERE state='queued' OR (state='retry_wait' AND retry_at<=?1) ORDER BY created_at,id LIMIT 1",
+            "SELECT id,path,state,downloaded,total,error,etag,last_modified,content_type,source,file_version,attempts,retry_at,failure_kind,queue_order FROM downloads WHERE state='queued' OR (state='retry_wait' AND retry_at<=?1) ORDER BY queue_order,id LIMIT 1",
             [crate::scheduler::now()], Self::row,
         ).optional()?;
         if let Some(item) = &item {
@@ -222,21 +231,28 @@ impl Store {
         Ok(())
     }
 
-    pub fn state(&self, id: &str, state: &str, error: Option<&str>) -> Result<()> {
-        self.db.lock().unwrap().execute(
-            "UPDATE downloads SET state=?2,error=?3,retry_at=NULL,attempts=CASE WHEN ?2='complete' THEN 0 ELSE attempts END,failure_kind=CASE WHEN ?2='complete' THEN NULL ELSE failure_kind END WHERE id=?1",
-            params![id, state, error],
-        )?;
-        Ok(())
+    pub fn transition(&self, id: &str, from: &str, to: &str) -> Result<bool> {
+        Ok(self.db.lock().unwrap().execute(
+            "UPDATE downloads SET state=?3,error=NULL,retry_at=NULL,attempts=CASE WHEN ?3='complete' THEN 0 ELSE attempts END,failure_kind=CASE WHEN ?3='complete' THEN NULL ELSE failure_kind END WHERE id=?1 AND state=?2",
+            params![id,from,to],
+        )? > 0)
     }
 
     pub fn command(&self, id: &str, resume: bool) -> Result<bool> {
         let sql = if resume {
-            "UPDATE downloads SET state='queued',error=NULL,attempts=0,retry_at=NULL,failure_kind=NULL WHERE id=?1 AND state IN ('paused','failed','retry_wait','waiting_login')"
+            "UPDATE downloads SET state='queued',error=NULL,attempts=0,retry_at=NULL,failure_kind=NULL WHERE id=?1 AND state IN ('paused','failed','retry_wait','waiting_login','cancelled','removed')"
         } else {
             "UPDATE downloads SET state='paused',retry_at=NULL WHERE id=?1 AND state IN ('queued','downloading','waiting_space','retry_wait','waiting_login')"
         };
-        Ok(self.db.lock().unwrap().execute(sql, [id])? > 0)
+        let db = self.db.lock().unwrap();
+        let changed = db.execute(sql, [id])? > 0;
+        if changed && resume {
+            db.execute(
+                "UPDATE managed_media SET suppressed=0 WHERE download_id=?1",
+                [id],
+            )?;
+        }
+        Ok(changed)
     }
 
     pub fn occupied_except(&self, id: &str) -> Result<u64> {
@@ -292,5 +308,56 @@ impl Store {
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+    pub fn cancel(&self, id: &str) -> Result<bool> {
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        let changed = tx.execute("UPDATE downloads SET state='cancelled',error=NULL,retry_at=NULL WHERE id=?1 AND state IN ('queued','downloading','paused','failed','retry_wait','waiting_login','waiting_space')", [id])?;
+        if changed > 0 {
+            tx.execute(
+                "UPDATE managed_media SET suppressed=1 WHERE download_id=?1",
+                [id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(changed > 0)
+    }
+    pub fn request_delete(&self, id: &str) -> Result<bool> {
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        let changed = tx.execute("UPDATE downloads SET state='deleting',error=NULL,retry_at=NULL WHERE id=?1 AND state!='removed'", [id])?;
+        if changed > 0 {
+            tx.execute(
+                "UPDATE managed_media SET suppressed=1 WHERE download_id=?1",
+                [id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(changed > 0)
+    }
+    pub fn reorder(&self, id: &str, direction: &str) -> Result<bool> {
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        let mut ids: Vec<String> = tx.prepare("SELECT id FROM downloads WHERE state IN ('queued','paused','failed','retry_wait','waiting_login','waiting_space') ORDER BY queue_order,id")?
+            .query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+        let Some(index) = ids.iter().position(|value| value == id) else {
+            return Ok(false);
+        };
+        let destination = match direction {
+            "up" => index.saturating_sub(1),
+            "down" => (index + 1).min(ids.len() - 1),
+            "first" => 0,
+            _ => bail!("invalid queue direction"),
+        };
+        let moved = ids.remove(index);
+        ids.insert(destination, moved);
+        for (position, id) in ids.iter().enumerate() {
+            tx.execute(
+                "UPDATE downloads SET queue_order=?2 WHERE id=?1",
+                params![id, position as i64],
+            )?;
+        }
+        tx.commit()?;
+        Ok(true)
     }
 }

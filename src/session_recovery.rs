@@ -23,7 +23,7 @@ impl Store {
             "waiting_space" => "capacity",
             _ => "permanent",
         };
-        self.db.lock().unwrap().execute("UPDATE downloads SET state=?2,error=?3,retry_at=?4,attempts=attempts+CASE WHEN ?2='retry_wait' THEN 1 ELSE 0 END,failure_kind=?5 WHERE id=?1",
+        self.db.lock().unwrap().execute("UPDATE downloads SET state=?2,error=?3,retry_at=?4,attempts=attempts+CASE WHEN ?2='retry_wait' THEN 1 ELSE 0 END,failure_kind=?5 WHERE id=?1 AND state='downloading'",
             params![id,state,error,retry_at,kind])?;
         Ok(())
     }

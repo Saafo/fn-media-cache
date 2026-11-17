@@ -174,7 +174,7 @@ impl Store {
             transaction.execute("UPDATE managed_media SET suppressed=0,completed_at=CASE WHEN suppressed=1 THEN ?3 ELSE completed_at END WHERE session_id=?1 AND item_guid=?2",
                 params![session.id,item.guid,if item.watched==Some(true) {Some(at)} else {None}])?;
             transaction.execute(
-                "UPDATE downloads SET state='queued',error=NULL WHERE id=?1 AND state='removed'",
+                "UPDATE downloads SET state='queued',error=NULL WHERE id=?1 AND state IN ('removed','cancelled')",
                 [download],
             )?;
         }

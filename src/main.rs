@@ -4,6 +4,7 @@ mod engine;
 mod fntv;
 mod library;
 mod logging;
+mod partial_cache;
 mod privacy;
 mod probe;
 mod protocol;
@@ -14,6 +15,7 @@ mod segments;
 mod server;
 mod session_recovery;
 mod store;
+mod transfers;
 
 use std::{
     fs,

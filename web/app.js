@@ -3,6 +3,7 @@ let token = '';
 const nativeBridge=window.__TAURI__?.core;
 let polling = false;
 let lastNotice = '';
+let pendingDeleteId = null;
 let settingsLoaded = false;
 let activePolicy = null;
 let catalogStarted = false;
@@ -11,6 +12,7 @@ let catalogHistory = [];
 let catalogSelection = new Set();
 const $ = id => document.getElementById(id);
 const sizes = bytes => bytes == null ? '未知' : bytes < 1024 ? `${bytes} B` : bytes < 1048576 ? `${(bytes / 1024).toFixed(1)} KiB` : bytes < 1073741824 ? `${(bytes / 1048576).toFixed(1)} MiB` : `${(bytes / 1073741824).toFixed(2)} GiB`;
+const duration = seconds => seconds == null ? '估算中' : seconds < 60 ? `${seconds} 秒` : seconds < 3600 ? `${Math.ceil(seconds / 60)} 分钟` : `${(seconds / 3600).toFixed(1)} 小时`;
 async function api(path, body) {
   if (nativeBridge) {
     const result=await nativeBridge.invoke('admin_request',{path,body:body??null});
@@ -47,6 +49,17 @@ async function refresh() {
     for (const [label, value] of [['请求', stats.requests], ['缓存命中', stats.cache_hits], ['上游读取', sizes(stats.origin_bytes)], ['本地供流', sizes(stats.cache_bytes)], ['跨域跳转', stats.external_redirects]]) {
       const div = document.createElement('div'); div.className = 'metric muted'; div.textContent = label; const b = document.createElement('b'); b.textContent = value; div.append(b); $('metrics').append(div);
     }
+    $('playback').replaceChildren();
+    for (const item of stats.playback || []) {
+      const title = automation.managed.find(value => value.download_id === item.download_id)?.item.title;
+      const row = document.createElement('tr');
+      cell(row, title || item.path, 'path');
+      cell(row, item.active_requests ? `传输中（${item.active_requests}）` : '最近读过');
+      cell(row, sizes(item.local_bytes)); cell(row, sizes(item.upstream_bytes));
+      const total = item.local_bytes + item.upstream_bytes;
+      cell(row, total ? `${(100 * item.local_bytes / total).toFixed(1)}%` : '—');
+      $('playback').append(row);
+    }
     $('route-summary').textContent = routes.measuring ? `正在依次测速，每条线路最多读取 ${sizes(activePolicy.route_sample_bytes)}。` : routes.selected ? `下载首选：${routes.selected}。测速时间：${new Date(routes.measured_at_ms).toLocaleTimeString()}；结果保留 ${activePolicy.route_result_ttl_seconds/60} 分钟，下次下载时按需重测。` : '等待可用的视频测速结果。登录和观看记录仍走主地址。';
     $('routes').replaceChildren();
     const routeNames = {unmeasured: '未测速', ready: '可用', failed: '失败', mismatch: '内容不一致或未验证'};
@@ -74,21 +87,39 @@ async function refresh() {
       if (item.cacheable) action(td, '完整下载', async () => {
         const saved = await api('/downloads', {observation_id: item.id});
         const job = (await api('/downloads')).find(value => value.id === saved.id);
-        if (job && ['paused', 'failed'].includes(job.state)) await api(`/downloads/${saved.id}/resume`, {});
+        if (job && ['paused', 'failed', 'cancelled', 'removed'].includes(job.state)) await api(`/downloads/${saved.id}/resume`, {});
         lastNotice = job?.state === 'complete' ? '这份视频已经完整缓存。' : '完整下载任务已提交。';
       });
       $('observations').append(row);
     }
-    const names = {queued:'排队',downloading:'下载中',complete:'已缓存',paused:'已暂停',failed:'失败',waiting_space:'等待空间',waiting_login:'等待同账号重新登录',retry_wait:'等待自动重试',deleting:'清理中',removed:'已清理'};
+    const names = {queued:'排队',downloading:'下载中',complete:'已缓存',paused:'已暂停',failed:'失败',waiting_space:'等待空间',waiting_login:'等待同账号重新登录',retry_wait:'等待自动重试',deleting:'等待释放缓存',removed:'已清理',cancelled:'已取消'};
     $('download-status').textContent = automation.playing && activePolicy.pause_during_playback ? '播放器正在读取视频，后台下载等待播放结束。' : `后台限速：${activePolicy.bytes_per_second ? sizes(activePolicy.bytes_per_second)+'/s' : '不限速'}；看完后保留 ${activePolicy.retention_seconds/3600} 小时。`;
     $('downloads').replaceChildren();
     for (const item of downloads) {
       const managed = automation.managed.filter(value => value.download_id === item.id);
       const row = document.createElement('tr'); cell(row, managed.length ? managed.map(value=>value.item.title || value.item.guid).join(' / ') : item.path, 'path'); cell(row, `${names[item.state] || item.state}${item.error ? ` · ${item.error}` : ''}`);
       if(item.retry_at) row.cells[1].append(document.createTextNode(` · 下次 ${new Date(item.retry_at*1000).toLocaleTimeString()}（第 ${item.attempts} 次）`));
-      cell(row, `${sizes(item.downloaded)} / ${sizes(item.total)}`); const td = cell(row, '');
+      cell(row, `${sizes(item.downloaded)} / ${sizes(item.total)}`);
+      cell(row, item.waiting_reason === 'playback' ? '为播放器让行' : item.state === 'downloading' ? `${sizes(item.bytes_per_second)}/s · ${duration(item.eta_seconds)}` : '—');
+      const td = cell(row, '');
+      if (['queued','paused','failed','retry_wait','waiting_space','waiting_login'].includes(item.state)) {
+        action(td, '提前', () => api(`/downloads/${item.id}/up`, {}));
+        action(td, '推后', () => api(`/downloads/${item.id}/down`, {}));
+        action(td, '优先下载', () => api(`/downloads/${item.id}/first`, {}));
+      }
+      if (!['complete','cancelled','removed','deleting'].includes(item.state)) action(td, '取消任务', () => api(`/downloads/${item.id}/cancel`, {}));
+      if (!['removed','deleting'].includes(item.state)) {
+        if (pendingDeleteId === item.id) {
+          const note=document.createElement('div'); note.textContent='删除本地文件并停止下载？上游影片不受影响。'; note.className='muted'; td.append(note);
+          action(td, '确认删除', async () => {
+            await api(`/downloads/${item.id}/delete`, {}); pendingDeleteId = null;
+            lastNotice = '已请求删除本地缓存，使用中的文件会在读取结束后释放。';
+          });
+          action(td, '保留缓存', () => { pendingDeleteId = null; });
+        } else action(td, '删除缓存', () => { pendingDeleteId = item.id; });
+      }
       if (['queued','downloading','waiting_space','retry_wait','waiting_login'].includes(item.state)) action(td, '暂停', () => api(`/downloads/${item.id}/pause`, {}));
-      if (['paused','failed','retry_wait','waiting_login'].includes(item.state)) action(td, '立即重试', () => api(`/downloads/${item.id}/resume`, {}));
+      if (['paused','failed','retry_wait','waiting_login','cancelled','removed'].includes(item.state)) action(td, item.state === 'removed' ? '重新下载' : '继续下载', () => api(`/downloads/${item.id}/resume`, {}));
       for (const entry of managed) {
         const identity={session_id:entry.session_id,item_guid:entry.item.guid};
         action(td, entry.keep?'取消保留':'保留', () => api('/managed/retention',{...identity,keep:!entry.keep}));

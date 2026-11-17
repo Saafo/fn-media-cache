@@ -104,6 +104,7 @@ pub struct CacheLease {
     uses: Arc<Mutex<HashMap<String, usize>>>,
     key: String,
     playback: Option<Arc<Mutex<PlaybackActivity>>>,
+    cleanup_wake: Arc<tokio::sync::Notify>,
 }
 impl Drop for CacheLease {
     fn drop(&mut self) {
@@ -119,6 +120,7 @@ impl Drop for CacheLease {
             activity.active -= 1;
             activity.last = Some(Instant::now());
         }
+        self.cleanup_wake.notify_one();
     }
 }
 
@@ -140,6 +142,7 @@ impl Engine {
             uses: self.cache_uses.clone(),
             key,
             playback: activity,
+            cleanup_wake: self.scheduler_wake.clone(),
         }
     }
 
@@ -330,6 +333,9 @@ impl Engine {
             if id.len() != 64 || !id.bytes().all(|c| c.is_ascii_hexdigit()) {
                 bail!("invalid local cache identity");
             }
+            let Ok(_file_guard) = self.transfers.file_gate(&id).try_write_owned() else {
+                continue;
+            };
             let key = item.source.cache_id();
             let uses = self.cache_uses.lock().unwrap();
             if uses.get(&key).copied().unwrap_or(0) > 0
@@ -379,7 +385,9 @@ impl Engine {
                         .saturating_sub(item.downloaded)
                         .saturating_add(self.disk_reserve())
             {
-                self.store.state(&item.id, "queued", None)?;
+                if !self.store.transition(&item.id, "waiting_space", "queued")? {
+                    continue;
+                }
                 crate::event!("download {} available space restored", &item.id[..12]);
                 self.wake.notify_one();
             }

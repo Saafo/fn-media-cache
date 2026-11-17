@@ -6,7 +6,8 @@ Rust 后台可以独立运行，管理页面内嵌在程序中。Tauri 桌面入
 
 ## 当前能力
 
-- HTTP 代理与单文件 Range 缓存，支持断点续传、暂停和恢复。
+- HTTP 代理与单文件 Range 缓存，支持断点续传、暂停和恢复；文件未下载完成时，也可读取已缓存部分，缺失部分回源。
+- 取消任务、删除本地缓存、调整等待队列顺序；查看单片本地与回源读取量、下载速度和预计剩余时间。
 - 搜索媒体库、浏览季集并选择下载；可配置后续剧集预取、限速与播放时让行。
 - 同一服务器的多地址测速、下载优选与失败切换。
 - 缓存容量管理、已看内容延时清理及手动保留。
@@ -32,6 +33,10 @@ cargo build --release --locked
 ## 配置与使用
 
 同一服务器的备用地址可以放进 `upstream_alternates`。地址必须属于同一台服务器，登录凭据会发送到这些地址。
+
+取消任务会保留已下载的数据，并停止自动续跑；可以手动继续。删除缓存会停止任务并释放本地文件，正在使用的文件会等读写结束后清理。调整队列只影响等待中的任务，不打断当前下载。
+
+播放读取统计按影片汇总本次后台运行期间的本地与回源字节，重启后清空；无痕模式不记录这项统计。缓存仍需向上游验证权限和文件版本，不提供离线鉴权。
 
 自动预取默认关闭。预取集数、下载速率、缓存上限、看完后的保留时间、重试与日志参数都可配置。相关设置保存在本机，重启后保留。清理只删除本机缓存，不修改上游影片或观看记录。
 
@@ -65,6 +70,7 @@ python3 tests/routes_integration.py --binary target/release/fn-media-cache
 python3 tests/automation_integration.py --binary target/release/fn-media-cache
 python3 tests/privacy_integration.py --binary target/release/fn-media-cache
 python3 tests/recovery_integration.py --binary target/release/fn-media-cache
+python3 tests/task_playback_integration.py --binary target/release/fn-media-cache
 python3 tests/shutdown.py --binary target/release/fn-media-cache
 ```
 

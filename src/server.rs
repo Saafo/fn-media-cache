@@ -144,7 +144,7 @@ async fn stats(State(engine): State<Arc<Engine>>) -> Json<serde_json::Value> {
     Json(
         json!({ "requests": c.requests.load(Ordering::Relaxed), "cache_hits": c.cache_hits.load(Ordering::Relaxed),
         "origin_bytes": c.origin_bytes.load(Ordering::Relaxed), "cache_bytes": c.cache_bytes.load(Ordering::Relaxed),
-        "external_redirects": c.external_redirects.load(Ordering::Relaxed), "max_cache_bytes": engine.cache_limit() }),
+        "external_redirects": c.external_redirects.load(Ordering::Relaxed), "max_cache_bytes": engine.cache_limit(), "playback": engine.transfers.playback() }),
     )
 }
 
@@ -340,6 +340,7 @@ async fn save_policy(
         engine.store.clear_playback_work().map_err(catalog_error)?;
         engine.progress_events.lock().unwrap().clear();
         engine.observations.lock().unwrap().clear();
+        engine.transfers.clear_playback();
     }
     engine.scheduler_wake.notify_one();
     Ok(Json(json!({"ok":true})))
@@ -380,11 +381,25 @@ async fn retention(
     Ok(Json(json!({"ok":true})))
 }
 
-async fn downloads(State(engine): State<Arc<Engine>>) -> ApiResult<Vec<Download>> {
+async fn downloads(
+    State(engine): State<Arc<Engine>>,
+) -> ApiResult<Vec<crate::transfers::DownloadView>> {
     engine
         .store
         .list()
-        .map(Json)
+        .map(|items| {
+            Json(
+                items
+                    .into_iter()
+                    .map(|item| {
+                        engine.transfers.download_view(
+                            item,
+                            engine.playing() && engine.policy.read().unwrap().pause_during_playback,
+                        )
+                    })
+                    .collect(),
+            )
+        })
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "cannot read queue"))
 }
 
@@ -425,11 +440,18 @@ async fn cache_samples(
     State(engine): State<Arc<Engine>>,
     Path(id): Path<String>,
 ) -> ApiResult<crate::segments::SampleCacheResult> {
+    let _guard = engine.transfers.file_gate(&id).read_owned().await;
     let item = engine
         .store
         .get(&id)
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "cannot read source"))?
         .ok_or((StatusCode::NOT_FOUND, "download source not found"))?;
+    if matches!(item.state.as_str(), "deleting" | "removed") {
+        return Err((
+            StatusCode::CONFLICT,
+            "cache is being deleted; enqueue it again first",
+        ));
+    }
     engine
         .cache_samples(&item.source)
         .await
@@ -476,6 +498,24 @@ async fn control(
     State(engine): State<Arc<Engine>>,
     Path((id, action)): Path<(String, String)>,
 ) -> ApiResult<serde_json::Value> {
+    if ["cancel", "delete", "up", "down", "first"].contains(&action.as_str()) {
+        let changed = match action.as_str() {
+            "cancel" => engine.store.cancel(&id),
+            "delete" => engine.store.request_delete(&id),
+            _ => engine.store.reorder(&id, &action),
+        }
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "cannot update task"))?;
+        if !changed {
+            return Err((
+                StatusCode::CONFLICT,
+                "task is missing or cannot enter that state",
+            ));
+        }
+        engine.wake.notify_one();
+        engine.scheduler_wake.notify_one();
+        crate::event!("download {} command={}", &id[..id.len().min(12)], action);
+        return Ok(Json(json!({"ok":true})));
+    }
     let resume = match action.as_str() {
         "resume" => true,
         "pause" => false,
@@ -503,26 +543,61 @@ async fn proxy(State(engine): State<Arc<Engine>>, request: Request<Body>) -> Res
         .map(|v| v.as_str())
         .unwrap_or("/");
     let source = Source::new(&engine.config.upstream, target, request.headers());
-    let lease =
-        (request.method() == Method::GET && target.starts_with("/v/api/v1/media/")).then(|| {
-            let mut file_source = source.clone();
-            file_source.target = file_source
-                .target
-                .split('?')
-                .next()
-                .unwrap_or("/")
-                .to_owned();
-            engine.cache_lease(file_source.cache_id(), true)
-        });
+    let is_get = request.method() == Method::GET;
+    let lease = is_get.then(|| {
+        let mut file_source = source.clone();
+        file_source.target = file_source
+            .target
+            .split('?')
+            .next()
+            .unwrap_or("/")
+            .to_owned();
+        let playback = target.starts_with("/v/api/v1/media/")
+            || crate::protocol::media_candidate(&HeaderMap::new(), target);
+        engine.cache_lease(file_source.cache_id(), playback)
+    });
     let response = proxy_inner(engine.clone(), request).await;
     if target_is_api(&source) && response.status().is_success() {
         let _ = engine.store.save_session(&source);
         engine.scheduler_wake.notify_one();
     }
     if let Some(lease) = lease {
+        let media = response.status().is_success()
+            && crate::protocol::media_candidate(response.headers(), &source.target);
+        let reading = (media && !engine.policy.read().unwrap().incognito).then(|| {
+            let download = engine
+                .store
+                .get_for_source(&source)
+                .ok()
+                .flatten()
+                .map(|d| d.id);
+            engine
+                .transfers
+                .start(source.cache_id(), download, source.display_path())
+        });
+        let mut local_left = response
+            .extensions()
+            .get::<crate::transfers::LocalPrefix>()
+            .map(|p| p.0)
+            .unwrap_or_else(|| {
+                if response
+                    .headers()
+                    .get("x-fn-media-cache")
+                    .is_some_and(|v| v == "HIT")
+                {
+                    u64::MAX
+                } else {
+                    0
+                }
+            });
         let (parts, body) = response.into_parts();
         let stream = body.into_data_stream().map_ok(move |chunk| {
             let _ = &lease;
+            if let Some(reading) = &reading {
+                let local = local_left.min(chunk.len() as u64);
+                local_left = local_left.saturating_sub(local);
+                reading.bytes(local, chunk.len() as u64 - local);
+            }
             chunk
         });
         Response::from_parts(parts, Body::from_stream(stream))
@@ -586,6 +661,22 @@ async fn proxy_inner(engine: Arc<Engine>, request: Request<Body>) -> Response {
                 parts.method,
                 response.status().as_u16(),
                 started.elapsed().as_millis()
+            );
+        }
+        return response;
+    }
+    if matches!(parts.method, Method::GET | Method::HEAD)
+        && let Some(response) =
+            crate::partial_cache::cached_prefix(&engine, &source, &parts.method, &parts.headers)
+                .await
+    {
+        engine.counters.cache_hits.fetch_add(1, Ordering::Relaxed);
+        if !private && !engine.policy.read().unwrap().incognito {
+            crate::event!(
+                "request {} {} partial-cache={}",
+                &id[..12],
+                parts.method,
+                response.status().as_u16()
             );
         }
         return response;
@@ -800,6 +891,7 @@ async fn cached(
     method: &Method,
     incoming: &HeaderMap,
 ) -> Option<Response> {
+    let file_guard = engine.transfers.file_gate(&item.id).read_owned().await;
     // Complex conditional requests and multipart ranges retain upstream semantics.
     if [
         "if-none-match",
@@ -878,6 +970,7 @@ async fn cached(
         file.seek(std::io::SeekFrom::Start(start)).await.ok()?;
         let state = engine.clone();
         let stream = ReaderStream::new(file.take(length)).map_ok(move |chunk| {
+            let _ = &file_guard;
             state
                 .counters
                 .cache_bytes

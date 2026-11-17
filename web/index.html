@@ -71,6 +71,9 @@
         <label>恢复检测阈值（秒）<input type="number" id="resume-threshold" min="1" max="3600"></label>
       </div><p class="muted">无痕不会删除已有观看历史。关闭无痕前先退出当前播放页，避免客户端之后补报缓存在内存中的进度。</p><button id="save-settings">保存设置</button><span class="muted" id="settings-state"></span>
     </details>
+    <h2>播放读取</h2>
+    <p class="muted">显示本次后台运行期间的媒体读取量。传输结束后，播放器可能仍在播放已缓冲的数据。</p>
+    <table><thead><tr><th>影片</th><th>连接状态</th><th>本地读取</th><th>回源读取</th><th>本地占比</th></tr></thead><tbody id="playback"></tbody></table>
     <h2>下载线路 <button id="probe-routes">重新测速</button></h2>
     <p class="muted" id="route-summary">等待视频请求。登录和观看记录仍走主地址。</p>
     <table><thead><tr><th>地址</th><th>状态</th><th>样本速度</th><th>样本耗时</th></tr></thead><tbody id="routes"></tbody></table>
@@ -79,8 +82,8 @@
     <table><thead><tr><th>路径</th><th>响应</th><th>大小</th><th>操作</th></tr></thead><tbody id="observations"></tbody></table>
     <h2>下载与缓存</h2>
     <p class="muted" id="download-status">仅一个后台下载并发。缓存命中前仍会向上游校验权限和文件版本。</p>
-    <p class="muted">“本地标记看完”只影响缓存清理，不改上游观看记录；“保留”会阻止自动清理。已清理的集不会再次自动预取，仍可手动重新下载。</p>
-    <table><thead><tr><th>路径</th><th>状态</th><th>进度</th><th>操作</th></tr></thead><tbody id="downloads"></tbody></table>
+    <p class="muted">“本地标记看完”只影响缓存清理，不改上游观看记录；“保留”会阻止自动清理。取消任务保留已下载数据；删除缓存释放空间，使用中的文件会等读取结束后删除。调整顺序不打断当前下载。</p>
+    <table><thead><tr><th>路径</th><th>状态</th><th>进度</th><th>速度 / 剩余时间</th><th>操作</th></tr></thead><tbody id="downloads"></tbody></table>
   </div>
 </body>
 </html>

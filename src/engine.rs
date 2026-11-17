@@ -63,12 +63,13 @@ pub struct Engine {
     pub observations: Mutex<VecDeque<Observation>>,
     pub progress_events: Mutex<VecDeque<ProgressEvent>>,
     pub counters: Counters,
+    pub transfers: Arc<crate::transfers::Transfers>,
     pub wake: Notify,
     pub shutdown: CancellationToken,
     pub probe_lock: tokio::sync::Mutex<()>,
     pub routes: Routes,
     pub policy: RwLock<Policy>,
-    pub scheduler_wake: Notify,
+    pub scheduler_wake: Arc<Notify>,
     pub cache_uses: Arc<Mutex<HashMap<String, usize>>>,
     pub playback_activity: Arc<Mutex<PlaybackActivity>>,
 }
@@ -106,11 +107,12 @@ impl Engine {
             observations: Mutex::new(VecDeque::new()),
             progress_events: Mutex::new(VecDeque::new()),
             counters: Counters::default(),
+            transfers: Arc::new(crate::transfers::Transfers::default()),
             wake: Notify::new(),
             shutdown: CancellationToken::new(),
             probe_lock: tokio::sync::Mutex::new(()),
             policy: RwLock::new(policy),
-            scheduler_wake: Notify::new(),
+            scheduler_wake: Arc::new(Notify::new()),
             cache_uses: Arc::new(Mutex::new(HashMap::new())),
             playback_activity: Arc::new(Mutex::new(PlaybackActivity::default())),
         }))
@@ -290,6 +292,7 @@ impl Engine {
                             );
                         }
                     }
+                    self.scheduler_wake.notify_one();
                 }
                 Ok(None) => tokio::select! {
                     _ = self.shutdown.cancelled() => return,
@@ -350,6 +353,15 @@ impl Engine {
         source: &Source,
         expected_version: Option<&str>,
     ) -> Result<()> {
+        let gate = self.transfers.file_gate(&item.id);
+        let exclusive = gate.clone().write_owned().await;
+        if self
+            .store
+            .get(&item.id)?
+            .is_none_or(|row| row.state != "downloading")
+        {
+            return self.interrupt(item);
+        }
         let partial = self.store.file(&item.id, true);
         let complete = self.store.file(&item.id, false);
         // A crash after rename but before the database commit is recoverable.
@@ -360,7 +372,7 @@ impl Engine {
         {
             item.downloaded = item.total.unwrap();
             self.store.progress(item)?;
-            self.store.state(&item.id, "complete", None)?;
+            self.store.transition(&item.id, "downloading", "complete")?;
             return Ok(());
         }
         item.downloaded = std::fs::metadata(&partial).map(|m| m.len()).unwrap_or(0);
@@ -402,7 +414,7 @@ impl Engine {
             drop(file);
             tokio::fs::rename(&partial, &complete).await?;
             self.store.progress(item)?;
-            self.store.state(&item.id, "complete", None)?;
+            self.store.transition(&item.id, "downloading", "complete")?;
             return Ok(());
         }
         if item.total.is_some_and(|size| resume_at >= size) {
@@ -507,8 +519,11 @@ impl Engine {
         item.content_type = text_header(response.headers(), "content-type");
         item.file_version = native.as_ref().map(|version| version.fingerprint.clone());
         self.store.progress(item)?;
+        let growing = tokio::sync::OwnedRwLockWriteGuard::downgrade(exclusive);
+        self.transfers.download_progress(&item.id, item.downloaded);
         let mut stream = response.bytes_stream();
         let mut saved_at = item.downloaded;
+        let mut saved_time = std::time::Instant::now();
         let mut next_chunk = std::time::Instant::now();
         loop {
             if !self.wait_background(Some(&item.id)).await? {
@@ -548,21 +563,28 @@ impl Engine {
             if item.downloaded.saturating_add(chunk.len() as u64) > total {
                 return Err(transfer_error("upstream sent more bytes than declared"));
             }
-            if !self
-                .pace_download(&item.id, chunk.len(), &mut next_chunk)
-                .await?
-            {
-                file.sync_data().await?;
-                return self.interrupt(item);
-            }
-            file.write_all(&chunk).await.context("cache write failed")?;
-            item.downloaded += chunk.len() as u64;
-            self.counters
-                .origin_bytes
-                .fetch_add(chunk.len() as u64, Ordering::Relaxed);
-            if item.downloaded - saved_at >= 1024 * 1024 {
-                self.store.progress(item)?;
-                saved_at = item.downloaded;
+            // Bounded writes keep rate measurements, cancellation and visible prefixes responsive.
+            for piece in chunk.chunks(64 * 1024) {
+                if !self
+                    .pace_download(&item.id, piece.len(), &mut next_chunk)
+                    .await?
+                {
+                    file.sync_data().await?;
+                    return self.interrupt(item);
+                }
+                file.write_all(piece).await.context("cache write failed")?;
+                item.downloaded += piece.len() as u64;
+                self.transfers.download_progress(&item.id, item.downloaded);
+                self.counters
+                    .origin_bytes
+                    .fetch_add(piece.len() as u64, Ordering::Relaxed);
+                if item.downloaded - saved_at >= 1024 * 1024
+                    || saved_time.elapsed() >= Duration::from_millis(500)
+                {
+                    self.store.progress(item)?;
+                    saved_at = item.downloaded;
+                    saved_time = std::time::Instant::now();
+                }
             }
         }
         if item.downloaded != total {
@@ -580,12 +602,22 @@ impl Engine {
         }
         file.sync_all().await?;
         drop(file);
+        drop(growing);
+        let _seal = gate.write_owned().await;
+        if self
+            .store
+            .get(&item.id)?
+            .is_none_or(|row| row.state != "downloading")
+        {
+            return self.interrupt(item);
+        }
         tokio::fs::rename(&partial, &complete)
             .await
             .context("cannot commit cache file")?;
         self.store.progress(item)?;
-        self.store.state(&item.id, "complete", None)?;
-        crate::event!("download {} complete: {} bytes", &item.id[..12], total);
+        if self.store.transition(&item.id, "downloading", "complete")? {
+            crate::event!("download {} complete: {} bytes", &item.id[..12], total);
+        }
         Ok(())
     }
 
@@ -596,7 +628,7 @@ impl Engine {
             .get(&item.id)?
             .is_some_and(|current| current.state == "downloading")
         {
-            self.store.state(&item.id, "queued", None)?;
+            self.store.transition(&item.id, "downloading", "queued")?;
         }
         Ok(())
     }
