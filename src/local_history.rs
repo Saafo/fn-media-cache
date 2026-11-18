@@ -1,5 +1,5 @@
 //! Recent plays owned by the local proxy. Only allowlisted client metadata is persisted.
-use std::{collections::VecDeque, sync::Mutex};
+use std::{collections::VecDeque, net::IpAddr, sync::Mutex, time::Instant};
 
 use anyhow::Result;
 use axum::{
@@ -292,6 +292,8 @@ pub async fn handle(
     method: &Method,
     path: &str,
     body: Body,
+    peer: IpAddr,
+    received_at: Instant,
 ) -> Response {
     if !has_credentials(source) {
         return (StatusCode::UNAUTHORIZED, "playback session required").into_response();
@@ -344,11 +346,13 @@ pub async fn handle(
     let Ok(report) = serde_json::from_slice::<Report>(&body) else {
         return (StatusCode::BAD_REQUEST, "invalid playback report").into_response();
     };
-    if report.ts.as_f64().is_none_or(|value| value < 0.0)
-        || report
-            .media_guid
-            .as_deref()
-            .is_some_and(|id| !id.is_empty() && !valid_guid(id))
+    let Some(position) = report.ts.as_f64().filter(|value| *value >= 0.0) else {
+        return (StatusCode::BAD_REQUEST, "invalid playback report").into_response();
+    };
+    if report
+        .media_guid
+        .as_deref()
+        .is_some_and(|id| !id.is_empty() && !valid_guid(id))
     {
         return (StatusCode::BAD_REQUEST, "invalid playback report").into_response();
     }
@@ -376,11 +380,19 @@ pub async fn handle(
     {
         return store_error();
     }
-    if policy.auto_prefetch
+    if (policy.auto_prefetch || policy.prevent_idle_sleep)
         && let Ok(Some(session)) = engine.store.save_session(source)
     {
-        let _ = engine.store.note_playback(&session.id, &item);
-        engine.scheduler_wake.notify_one();
+        engine.report_playback(&session.id, &item, position, peer, received_at, &policy);
+        if engine.prefetch_watch.lock().unwrap().eligible(
+            &session.id,
+            &item,
+            &policy,
+            Instant::now(),
+        ) {
+            let _ = engine.store.note_playback(&session.id, &item);
+            engine.scheduler_wake.notify_one();
+        }
     }
     response(json!(true))
 }

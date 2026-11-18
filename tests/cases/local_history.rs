@@ -1,6 +1,7 @@
 use crate::support::*;
 use reqwest::Method;
 use serde_json::{Value, json};
+use std::time::Duration;
 
 const RECORD: &str = "/v/api/v1/play/record";
 const LIST: &str = "/v/api/v1/play/list";
@@ -296,9 +297,18 @@ async fn local_reports_trigger_prefetch_without_using_cloud_completion() {
         "UPDATE managed_media SET completed_at=unixepoch()-5,upstream_watched=1 WHERE item_guid='one'",
         [],
     ).unwrap();
-    h.policy(json!({"retention_seconds":0,"auto_prefetch":true}))
+    h.policy(json!({"retention_seconds":0,"auto_prefetch":true,"prefetch_after_seconds":1}))
         .await;
     record(&h, TOKEN, "one", 42).await;
+    assert!(
+        !h.api("/automation", None).await["managed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["item"]["guid"] == "two")
+    );
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    record(&h, TOKEN, "one", 44).await;
     until("local play triggers prefetch", || async {
         h.api("/automation", None).await["managed"]
             .as_array()

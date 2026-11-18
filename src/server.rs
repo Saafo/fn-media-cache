@@ -1,18 +1,20 @@
 use std::{
+    net::{IpAddr, SocketAddr},
     sync::{Arc, Mutex, atomic::Ordering},
+    task::Poll,
     time::Instant,
 };
 
 use axum::{
     Json, Router,
     body::{Body, to_bytes},
-    extract::{DefaultBodyLimit, Path, State},
+    extract::{ConnectInfo, DefaultBodyLimit, Path, State},
     http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
-use futures_util::TryStreamExt;
+use futures_util::{StreamExt, TryStreamExt};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -33,6 +35,7 @@ pub fn admin_router(engine: Arc<Engine>) -> Router {
     let api = Router::new()
         .route("/stats", get(stats))
         .route("/observations", get(observations))
+        .route("/proxy-requests", get(proxy_requests))
         .route("/progress-events", get(progress_events))
         .route("/routes", get(routes))
         .route("/routes/probe", post(probe_routes))
@@ -167,6 +170,12 @@ async fn stats(State(engine): State<Arc<Engine>>) -> Json<serde_json::Value> {
 
 async fn observations(State(engine): State<Arc<Engine>>) -> Json<serde_json::Value> {
     Json(json!(*engine.observations.lock().unwrap()))
+}
+
+async fn proxy_requests(
+    State(engine): State<Arc<Engine>>,
+) -> Json<Vec<crate::proxy_requests::ProxyRequest>> {
+    Json(engine.proxy_requests.lock().unwrap().snapshot())
 }
 
 async fn progress_events(State(engine): State<Arc<Engine>>) -> Json<serde_json::Value> {
@@ -351,7 +360,7 @@ async fn library_download(
         .map_err(catalog_error)?;
     let mut results = vec![];
     for guid in input.item_guids {
-        match engine.queue_catalog_item(&session,&guid,true,input.paused).await {
+        match engine.queue_catalog_item(&session,&guid,None,input.paused).await {
             Ok(id)=>results.push(json!({"item_guid":guid,"id":id,"ok":true})),
             Err(_)=>results.push(json!({"item_guid":guid,"ok":false,"error":"无法取得可缓存的原始文件，请检查会话与权限"})),
         }
@@ -367,6 +376,7 @@ async fn automation(State(engine): State<Arc<Engine>>) -> ApiResult<serde_json::
         "managed": managed,
         "playing": engine.playing(),
         "downloads_yielding": engine.downloads_yielding(),
+        "prevent_idle_sleep_supported": crate::power::SUPPORTED,
         "cache_limit_bytes": engine.cache_limit()
     })))
 }
@@ -392,8 +402,15 @@ async fn save_policy(
             engine.progress_events.lock().unwrap().clear();
             engine.history_metadata.clear();
         }
+        if clear || !policy.prevent_idle_sleep {
+            engine.power.clear_reports();
+        }
+        if clear || !policy.auto_prefetch {
+            *engine.prefetch_watch.lock().unwrap() = Default::default();
+        }
         if policy.incognito {
             engine.observations.lock().unwrap().clear();
+            engine.proxy_requests.lock().unwrap().clear();
             engine.transfers.clear_playback();
         } else if policy.local_history {
             engine
@@ -594,7 +611,23 @@ async fn control(
     Ok(Json(json!({"ok": true})))
 }
 
-async fn proxy(State(engine): State<Arc<Engine>>, request: Request<Body>) -> Response {
+async fn proxy(
+    State(engine): State<Arc<Engine>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    request: Request<Body>,
+) -> Response {
+    let client_ip = peer.ip().to_canonical();
+    let pending = {
+        let policy = engine.policy.read().unwrap();
+        (!policy.incognito).then(|| {
+            crate::proxy_requests::History::start(
+                &engine.proxy_requests,
+                request.method(),
+                request.uri().path(),
+                client_ip,
+            )
+        })
+    };
     let target = request
         .uri()
         .path_and_query()
@@ -602,6 +635,11 @@ async fn proxy(State(engine): State<Arc<Engine>>, request: Request<Body>) -> Res
         .unwrap_or("/");
     let source = Source::new(&engine.config.upstream, target, request.headers());
     let is_get = request.method() == Method::GET;
+    let media_target = target.starts_with("/v/api/v1/media/range/")
+        || crate::protocol::media_candidate(&HeaderMap::new(), target);
+    let trace = (is_get && !engine.policy.read().unwrap().incognito).then(|| {
+        crate::media_trace::Request::new(request.headers(), engine.transfers.playback_generation())
+    });
     let lease = is_get.then(|| {
         let mut file_source = source.clone();
         file_source.target = file_source
@@ -614,7 +652,10 @@ async fn proxy(State(engine): State<Arc<Engine>>, request: Request<Body>) -> Res
             || crate::protocol::media_candidate(&HeaderMap::new(), target);
         engine.cache_lease(file_source.cache_id(), playback)
     });
-    let response = proxy_inner(engine.clone(), request).await;
+    let response = proxy_inner(engine.clone(), request, client_ip).await;
+    if let Some(pending) = pending {
+        pending.finish(&response);
+    }
     if target_is_api(&source)
         && response.status().is_success()
         && !response.headers().contains_key("x-fn-media-cache-privacy")
@@ -626,6 +667,9 @@ async fn proxy(State(engine): State<Arc<Engine>>, request: Request<Body>) -> Res
         let media = response.status().is_success()
             && crate::protocol::media_candidate(response.headers(), &source.target);
         let policy = engine.policy.read().unwrap();
+        let mut trace = trace
+            .filter(|_| (media || media_target) && !policy.incognito)
+            .map(|trace| trace.response(engine.transfers.clone(), &source, &response));
         let reading = (media && !policy.incognito).then(|| {
             let download = engine
                 .store
@@ -655,14 +699,30 @@ async fn proxy(State(engine): State<Arc<Engine>>, request: Request<Body>) -> Res
                 }
             });
         let (parts, body) = response.into_parts();
-        let stream = body.into_data_stream().map_ok(move |chunk| {
+        let mut body = body.into_data_stream();
+        let stream = futures_util::stream::poll_fn(move |cx| {
             let _ = &lease;
-            if let Some(reading) = &reading {
-                let local = local_left.min(chunk.len() as u64);
-                local_left = local_left.saturating_sub(local);
-                reading.bytes(local, chunk.len() as u64 - local);
+            let next = body.poll_next_unpin(cx);
+            match &next {
+                Poll::Ready(Some(Ok(chunk))) => {
+                    let bytes = chunk.len() as u64;
+                    let local = local_left.min(bytes);
+                    local_left = local_left.saturating_sub(local);
+                    if let Some(reading) = &reading {
+                        reading.bytes(local, bytes - local);
+                    }
+                    if let Some(trace) = &mut trace {
+                        trace.chunk(bytes, local);
+                    }
+                }
+                Poll::Ready(Some(Err(_))) | Poll::Ready(None) => {
+                    if let Some(trace) = &mut trace {
+                        trace.finish(matches!(&next, Poll::Ready(Some(Err(_)))));
+                    }
+                }
+                Poll::Pending => {}
             }
-            chunk
+            next
         });
         Response::from_parts(parts, Body::from_stream(stream))
     } else {
@@ -674,7 +734,7 @@ fn target_is_api(source: &Source) -> bool {
     source.target.starts_with("/v/api/v1/")
 }
 
-async fn proxy_inner(engine: Arc<Engine>, request: Request<Body>) -> Response {
+async fn proxy_inner(engine: Arc<Engine>, request: Request<Body>, client_ip: IpAddr) -> Response {
     let started = Instant::now();
     engine.counters.requests.fetch_add(1, Ordering::Relaxed);
     let (parts, body) = request.into_parts();
@@ -701,8 +761,16 @@ async fn proxy_inner(engine: Arc<Engine>, request: Request<Body>) -> Response {
         && (local_history::list_request(&parts.method, parts.uri.path())
             || crate::privacy::viewing_report(&parts.method, parts.uri.path()))
     {
-        return local_history::handle(&engine, &source, &parts.method, parts.uri.path(), body)
-            .await;
+        return local_history::handle(
+            &engine,
+            &source,
+            &parts.method,
+            parts.uri.path(),
+            body,
+            client_ip,
+            started,
+        )
+        .await;
     }
     let play_info = !private && local_history::info_request(&parts.method, parts.uri.path());
     let local_info = policy.local_history && play_info;
@@ -808,16 +876,22 @@ async fn proxy_inner(engine: Arc<Engine>, request: Request<Body>) -> Response {
             .as_ref()
             .map(|response| response.status().as_u16())
             .unwrap_or(502);
-        engine.record_progress(&source, capture.lock().unwrap().take(), status);
+        engine.record_progress(
+            &source,
+            capture.lock().unwrap().take(),
+            status,
+            client_ip,
+            started,
+        );
     }
     let upstream = match result {
         Ok(response) => response,
         Err(_) => return (StatusCode::BAD_GATEWAY, "upstream request failed").into_response(),
     };
     let status = upstream.status();
-    if parts.method == Method::GET {
-        engine.observe(source.clone(), status.as_u16(), upstream.headers());
-    }
+    let observation = (parts.method == Method::GET)
+        .then(|| engine.observe(source.clone(), status.as_u16(), upstream.headers()))
+        .flatten();
     let mut headers = clean_headers(upstream.headers());
     if let Some(location) = text_header(&headers, "location")
         && let Ok(destination) = source.url().and_then(|url| Ok(url.join(&location)?))
@@ -890,6 +964,11 @@ async fn proxy_inner(engine: Arc<Engine>, request: Request<Body>) -> Response {
     let mut response = Response::new(Body::from_stream(stream));
     *response.status_mut() = status;
     *response.headers_mut() = headers;
+    if let Some(id) = observation {
+        response
+            .extensions_mut()
+            .insert(crate::proxy_requests::ObservedMedia(id));
+    }
     if local_info && status.is_success() {
         return local_play_info(&engine, &source, response).await;
     }

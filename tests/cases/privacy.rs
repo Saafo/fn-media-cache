@@ -81,8 +81,11 @@ async fn incognito_reports_and_history() {
     assert_eq!(origin.snapshot().writes.len(), 2);
     assert!(origin.snapshot().writes[1].1.ends_with("/play/play"));
     assert_eq!(h.api("/observations", None).await, json!([]));
+    assert_eq!(h.api("/proxy-requests", None).await, json!([]));
     assert_eq!(h.api("/progress-events", None).await, json!([]));
     assert_eq!(h.api("/downloads", None).await, json!([]));
+    let log = std::fs::read_to_string(h.root().join("data/logs/service.log")).unwrap();
+    assert!(!log.contains("media transfer"));
     case(
         "media bytes and playback setup still work; incognito requests create no observations, progress events or prefetch tasks",
     );

@@ -2,6 +2,7 @@
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::Serialize;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::{
     library::{MediaItem, Session},
@@ -28,6 +29,13 @@ pub struct PlaybackWork {
     pub session_id: String,
     pub item_guid: String,
     pub seen_at: i64,
+}
+
+fn playback_work_timestamp_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
 }
 
 impl Store {
@@ -295,15 +303,18 @@ impl Store {
     pub fn note_playback(&self, session: &str, item: &str) -> Result<()> {
         self.db.lock().unwrap().execute(
             "INSERT INTO playback_work(session_id,item_guid,seen_at) VALUES (?1,?2,?3)
-            ON CONFLICT(session_id,item_guid) DO UPDATE SET seen_at=excluded.seen_at",
-            params![session, item, now()],
+            ON CONFLICT(session_id,item_guid) DO UPDATE SET seen_at=MAX(excluded.seen_at,playback_work.seen_at+1)",
+            params![session, item, playback_work_timestamp_ms()],
         )?;
         Ok(())
     }
 
     pub fn playback_work(&self) -> Result<Vec<PlaybackWork>> {
         let db = self.db.lock().unwrap();
-        db.execute("DELETE FROM playback_work WHERE seen_at<?1", [now() - 600])?;
+        db.execute(
+            "DELETE FROM playback_work WHERE seen_at<?1",
+            [playback_work_timestamp_ms() - 600_000],
+        )?;
         Ok(db.prepare("SELECT session_id,item_guid,seen_at FROM playback_work ORDER BY seen_at DESC LIMIT 100")?
             .query_map([],|r|Ok(PlaybackWork{session_id:r.get(0)?,item_guid:r.get(1)?,seen_at:r.get(2)?}))?.collect::<rusqlite::Result<_>>()?)
     }

@@ -163,6 +163,8 @@ details summary { cursor: pointer; }
 .diagnostics summary { font-weight: 650; }
 .diagnostics[open] summary { margin-bottom: 12px; }
 .diagnostics .toolbar { margin: 0 0 10px; }
+.request-scroll { max-height: 460px; overflow: auto; }
+.request-scroll th { position: sticky; top: 0; background: var(--surface); }
 .catalog-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(168px, .34fr); gap: 12px; align-items: start; }
 .catalog-search input { min-width: 115px; flex: 1; }
 .catalog-search select { max-width: 200px; }

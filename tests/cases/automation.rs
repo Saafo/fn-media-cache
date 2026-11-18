@@ -72,9 +72,29 @@ async fn catalog_prefetch_and_cleanup() {
         "an active player stops background transfer; release resumes it with the configured byte rate",
     );
 
-    h.policy(json!({"auto_prefetch":true,"bytes_per_second":0}))
+    assert_eq!(
+        h.api("/automation", None).await["policy"]["prefetch_after_seconds"],
+        60
+    );
+    assert_eq!(
+        h.api("/automation", None).await["policy"]["retention_seconds"],
+        172_800
+    );
+    h.policy(json!({"auto_prefetch":true,"prefetch_after_seconds":1,"bytes_per_second":0}))
         .await;
-    h.progress("one").await;
+    h.progress_at("one", 500).await;
+    h.progress_at("one", 900).await;
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    h.progress_at("one", 900).await;
+    assert!(
+        !h.api("/automation", None).await["managed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["item"]["guid"] == "three")
+    );
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    h.progress_at("one", 902).await;
     until("next episode prefetch", || async {
         h.api("/automation", None).await["managed"]
             .as_array()
@@ -84,7 +104,9 @@ async fn catalog_prefetch_and_cleanup() {
     })
     .await;
     assert!(h.managed("one").await["completed_at"].is_null());
-    h.progress("three").await;
+    h.progress_at("three", 10).await;
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    h.progress_at("three", 12).await;
     until("next season prefetch", || async {
         h.api("/automation", None).await["managed"]
             .as_array()

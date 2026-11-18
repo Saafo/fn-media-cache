@@ -1,17 +1,20 @@
 <script setup lang="ts">
 import { computed, ref, shallowRef, watch } from 'vue'
 import { desktopCall, errorText, get, jobAction, post } from './api'
-import type { JobState, MediaItem, Observation, Routes, Snapshot, Stats } from './api'
+import type { JobState, MediaItem, ProxyRequest, Routes, Snapshot, Stats } from './api'
 import { downloadSpeed, mediaTitle, size, waitingStates } from './downloads'
 
 const props = defineProps<{ snapshot?: Snapshot; visible: boolean; canOpenLogs: boolean }>()
 const emit = defineEmits<{ refresh: []; notice: [message: string]; showTasks: [] }>()
 const routes = shallowRef<Routes>()
-const observations = shallowRef<Observation[]>([])
+const requests = shallowRef<ProxyRequest[]>([])
 const diagnostics = ref(false)
 const readError = ref('')
 const probing = ref(false)
 const busy = ref('')
+const requestTime = new Intl.DateTimeFormat(undefined, {
+  hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3, hourCycle: 'h23',
+})
 let reading = false
 let generation = 0
 
@@ -55,12 +58,12 @@ async function read() {
   reading = true
   const current = generation
   try {
-    const [nextRoutes, nextObservations] = await Promise.all([
-      get('/routes'), diagnostics.value ? get('/observations') : Promise.resolve(undefined),
+    const [nextRoutes, nextRequests] = await Promise.all([
+      get('/routes'), diagnostics.value ? get('/proxy-requests') : Promise.resolve(undefined),
     ])
     if (current !== generation) return
     routes.value = nextRoutes
-    if (nextObservations && diagnostics.value) observations.value = nextObservations
+    if (nextRequests && diagnostics.value) requests.value = nextRequests
     readError.value = ''
   } catch (error) {
     if (current === generation && props.visible) readError.value = errorText(error)
@@ -73,7 +76,7 @@ watch(() => props.snapshot, value => {
   if (!value) {
     generation++
     routes.value = undefined
-    observations.value = []
+    requests.value = []
     readError.value = ''
   }
   void read()
@@ -135,12 +138,12 @@ async function openLogs() {
   }
 }
 
-async function capture(item: Observation, sample: boolean) {
-  if (busy.value) return
-  busy.value = item.id
+async function capture(item: ProxyRequest, sample: boolean) {
+  if (busy.value || !item.observation_id) return
+  busy.value = item.observation_id
   emit('notice', '')
   try {
-    const saved = await post('/downloads', { observation_id: item.id, ...(sample ? { paused: true } : {}) })
+    const saved = await post('/downloads', { observation_id: item.observation_id, ...(sample ? { paused: true } : {}) })
     const job = (await get('/downloads')).find(value => value.id === saved.id)
     if (sample) {
       if (job && ['queued', 'downloading'].includes(job.state)) {
@@ -242,24 +245,31 @@ async function capture(item: Observation, sample: boolean) {
         <summary>诊断</summary>
         <p class="hint">缓存命中 {{ snapshot.stats.cache_hits }} 次 · 跨域跳转 {{ snapshot.stats.external_redirects }} 次</p>
         <h2>最近代理请求</h2>
-        <p v-if="!observations.length" class="hint">暂无代理请求。</p>
-        <table v-else aria-label="代理请求">
-          <thead><tr><th scope="col">路径</th><th scope="col">响应</th><th scope="col">大小</th><th scope="col">操作</th></tr></thead>
-          <tbody id="observations">
-            <tr v-for="item in observations" :key="item.id">
-              <td class="path">{{ item.path }}</td><td>{{ item.status ?? '—' }}</td><td class="number">{{ size(item.total) }}</td>
-              <td>
-                <div v-if="item.cacheable" class="toolbar">
-                  <button
-                    v-if="item.path.startsWith('/v/api/v1/media/range/')"
-                    type="button" title="最多读取 3 MiB" :disabled="Boolean(busy)" @click="capture(item, true)"
-                  >缓存样本</button>
-                  <button type="button" :disabled="Boolean(busy)" @click="capture(item, false)">完整下载</button>
-                </div>
-              </td>
-            </tr>
-          </tbody>
-        </table>
+        <p v-if="!requests.length" class="hint">暂无代理请求。</p>
+        <div v-else class="request-scroll">
+          <table aria-label="代理请求">
+            <thead><tr><th scope="col">时间</th><th scope="col">设备 IP</th><th scope="col">Method</th><th scope="col">路径</th><th scope="col">响应</th><th scope="col">大小</th><th scope="col">操作</th></tr></thead>
+            <tbody id="proxy-requests">
+              <tr v-for="item in requests" :key="item.id">
+                <td class="number"><time :datetime="new Date(item.timestamp_ms).toISOString()" :title="new Date(item.timestamp_ms).toLocaleString()">{{ requestTime.format(item.timestamp_ms) }}</time></td>
+                <td class="number">{{ item.client_ip ?? '—' }}</td>
+                <td>{{ item.method }}</td>
+                <td class="path">{{ item.path }}</td>
+                <td>{{ item.status ?? (item.pending ? '等待响应' : '连接已关闭') }}</td>
+                <td class="number">{{ size(item.total) }}</td>
+                <td>
+                  <div v-if="item.observation_id" class="toolbar">
+                    <button
+                      v-if="item.path.startsWith('/v/api/v1/media/range/')"
+                      type="button" title="最多读取 3 MiB" :disabled="Boolean(busy)" @click="capture(item, true)"
+                    >缓存样本</button>
+                    <button type="button" :disabled="Boolean(busy)" @click="capture(item, false)">完整下载</button>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
       </details>
     </template>
   </section>

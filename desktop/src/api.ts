@@ -40,8 +40,10 @@ export interface Policy {
   incognito: boolean
   local_history: boolean
   prefetch_count: number
+  prefetch_after_seconds?: number
   bytes_per_second: number
   pause_during_playback: boolean
+  prevent_idle_sleep: boolean
   cleanup_enabled: boolean
   retention_seconds: number
   playback_cooldown_seconds: number
@@ -63,6 +65,7 @@ export interface Automation {
   managed: ManagedMedia[]
   playing: boolean
   downloads_yielding?: boolean
+  prevent_idle_sleep_supported?: boolean
   cache_limit_bytes: number
 }
 
@@ -102,12 +105,16 @@ export interface Routes {
   }[]
 }
 
-export interface Observation {
-  id: string
+export interface ProxyRequest {
+  id: number
+  timestamp_ms: number
+  method: string
+  client_ip?: string
   path: string
   status: number | null
   total: number | null
-  cacheable: boolean
+  observation_id: string | null
+  pending: boolean
 }
 
 export interface Session {
@@ -146,7 +153,7 @@ interface Reads {
   '/downloads': Download[]
   '/automation': Automation
   '/routes': Routes
-  '/observations': Observation[]
+  '/proxy-requests': ProxyRequest[]
   '/sessions': Session[]
 }
 

@@ -254,9 +254,10 @@ impl Engine {
         &self,
         session: &Session,
         guid: &str,
-        explicit: bool,
+        prefetch_from: Option<&str>,
         paused: bool,
     ) -> Result<String> {
+        let explicit = prefetch_from.is_none();
         self.verify_session(session).await?;
         if !explicit && self.store.suppressed(&session.id, guid)? {
             bail!("automatic download suppressed");
@@ -286,8 +287,15 @@ impl Engine {
         };
         fntv::file_version(&self.client, &source).await?;
         let policy = self.policy.read().unwrap();
-        if !explicit && policy.incognito {
-            bail!("automatic downloads are paused in incognito mode");
+        if let Some(current) = prefetch_from
+            && !self.prefetch_watch.lock().unwrap().eligible(
+                &session.id,
+                current,
+                &policy,
+                std::time::Instant::now(),
+            )
+        {
+            bail!("automatic prefetch is no longer eligible");
         }
         if policy.local_history {
             item.watched = None;

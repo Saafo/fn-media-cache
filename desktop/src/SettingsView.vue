@@ -17,7 +17,7 @@ const savingServer = ref(false)
 const savedPolicy = ref('')
 const savedServer = ref('')
 
-type NumericKey = Exclude<keyof Policy, 'incognito' | 'local_history' | 'auto_prefetch' | 'pause_during_playback' | 'cleanup_enabled'>
+type NumericKey = Exclude<keyof Policy, 'incognito' | 'local_history' | 'auto_prefetch' | 'pause_during_playback' | 'prevent_idle_sleep' | 'cleanup_enabled' | 'prefetch_after_seconds'>
 type NumberField = [key: NumericKey, label: string, min: number, max: number | undefined, scale?: number]
 const downloadFields: NumberField[] = [
   ['bytes_per_second', '限速（MiB/s，0 为不限速）', 0, 1024, MiB],
@@ -169,6 +169,11 @@ async function saveServer() {
         </label>
         <label><span><input v-model="policy.pause_during_playback" type="checkbox" aria-describedby="playback-yield-note">播放回源时暂停下载</span></label>
         <label><span><input v-model="policy.auto_prefetch" type="checkbox">自动预取后续剧集</span></label>
+        <label v-if="policy.prefetch_after_seconds !== undefined">
+          预取前播放时长（秒，0 为立即）
+          <input v-model.number="policy.prefetch_after_seconds" type="number" min="0" max="3600" step="1" required>
+        </label>
+        <label v-if="snapshot?.automation.prevent_idle_sleep_supported"><span><input v-model="policy.prevent_idle_sleep" type="checkbox">播放或下载时防止休眠</span></label>
       </div>
       <p id="playback-yield-note" class="hint settings-note">从飞牛读取视频时暂停后台下载。只读本地缓存时，下载照常。</p>
       <p v-if="historyNote" class="hint settings-note">{{ historyNote }}</p>

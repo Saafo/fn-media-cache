@@ -59,6 +59,35 @@ async fn generic_proxy_and_cache() {
     case("client progress requests are forwarded unchanged and observed without private fields");
 
     h.get("/nohead.mp4", AUTH, Some("bytes=0-31")).await;
+    h.get("/nohead.mp4", AUTH, Some("bytes=0-31")).await;
+    h.send(
+        &h.proxy,
+        "/library",
+        Method::HEAD,
+        &[("X-Forwarded-For", "192.0.2.123")],
+        None,
+    )
+    .await;
+    let history = h.api("/proxy-requests", None).await;
+    let history = history.as_array().unwrap();
+    assert_eq!(history[0]["method"], "HEAD");
+    assert_eq!(history[0]["client_ip"], "127.0.0.1");
+    for row in &history[1..3] {
+        assert_eq!(row["path"], "/nohead.mp4");
+        assert_eq!(row["method"], "GET");
+        assert_eq!(row["status"], 206);
+        assert_eq!(row["total"], 8 * 1024 * 1024);
+        assert!(row["observation_id"].is_string());
+        assert!(row["timestamp_ms"].as_u64().unwrap() > 0);
+    }
+    assert_ne!(history[1]["id"], history[2]["id"]);
+    assert_eq!(history[3]["method"], "POST");
+    assert_eq!(history[3]["path"], "/v/api/v1/play/record");
+    assert_eq!(history[3]["status"], 200);
+    assert!(history[3]["observation_id"].is_null());
+    assert!(!json!(history).to_string().contains("must-not-be-recorded"));
+    case("recent requests include POST, HEAD and repeated GET with arrival time and safe metadata");
+
     let observations = h.api("/observations", None).await;
     let id = observations
         .as_array()
@@ -139,6 +168,9 @@ async fn generic_proxy_and_cache() {
         assert_eq!(reply.status, status);
         assert_eq!(reply.body, expected);
         assert_eq!(reply.header("x-fn-media-cache"), "HIT");
+        let requests = h.api("/proxy-requests", None).await;
+        assert_eq!(requests[0]["path"], "/movie.mp4");
+        assert_eq!(requests[0]["status"], status);
         assert_eq!(
             origin
                 .snapshot()
@@ -289,9 +321,10 @@ async fn generic_proxy_and_cache() {
     assert!(!other.status.success());
     assert!(String::from_utf8_lossy(&other.stderr).contains("another instance"));
     let raw = format!(
-        "{}{}",
+        "{}{}{}",
         h.api("/downloads", None).await,
-        h.api("/observations", None).await
+        h.api("/observations", None).await,
+        h.api("/proxy-requests", None).await
     );
     assert!(
         !raw.contains("fixture-secret-query") && !raw.contains(AUTH) && !raw.contains("\"source\"")
@@ -311,5 +344,12 @@ async fn generic_proxy_and_cache() {
     h.stop(false).await;
     let log = fs::read_to_string(h.root().join("launcher.log")).unwrap();
     assert!(!log.contains(AUTH) && !log.contains("fixture-secret-query"));
+    let media_log = fs::read_to_string(h.root().join("data/logs/service.log")).unwrap();
+    assert!(!media_log.contains(AUTH) && !media_log.contains("fixture-secret-query"));
+    assert!(media_log.lines().any(|line| {
+        line.contains("status=206 source=origin range=\"bytes=0-31\"")
+            && line.contains("content_range=\"bytes 0-31/8388608\"")
+            && line.contains("bytes=32 local_bytes=0 origin_bytes=32 outcome=complete")
+    }));
     case("request logs contain neither credentials nor signed query strings");
 }

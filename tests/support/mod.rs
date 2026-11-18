@@ -363,7 +363,10 @@ impl Harness {
         self.api("/managed/retention", Some(body)).await;
     }
     pub async fn progress(&self, guid: &str) {
-        let body = json!({"item_guid":guid,"media_guid":origin::media(guid),"ts":999999,"duration":1000000}).to_string();
+        self.progress_at(guid, 999_999).await;
+    }
+    pub async fn progress_at(&self, guid: &str, position: usize) {
+        let body = json!({"item_guid":guid,"media_guid":origin::media(guid),"ts":position,"duration":1000000}).to_string();
         assert_eq!(
             self.send(
                 &self.proxy,

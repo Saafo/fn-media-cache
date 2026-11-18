@@ -26,8 +26,10 @@ pub struct Policy {
     pub incognito: bool,
     pub local_history: bool,
     pub prefetch_count: usize,
+    pub prefetch_after_seconds: u64,
     pub bytes_per_second: u64,
     pub pause_during_playback: bool,
+    pub prevent_idle_sleep: bool,
     pub cleanup_enabled: bool,
     pub retention_seconds: u64,
     pub playback_cooldown_seconds: u64,
@@ -50,10 +52,12 @@ impl Default for Policy {
             incognito: false,
             local_history: false,
             prefetch_count: 2,
+            prefetch_after_seconds: 60,
             bytes_per_second: 10 * 1024 * 1024,
             pause_during_playback: true,
+            prevent_idle_sleep: false,
             cleanup_enabled: true,
-            retention_seconds: 86400,
+            retention_seconds: 48 * 60 * 60,
             playback_cooldown_seconds: 2,
             reserved_disk_bytes: 64 * 1024 * 1024,
             cache_limit_bytes: None,
@@ -79,6 +83,7 @@ impl Policy {
             bail!("local history and incognito are mutually exclusive");
         }
         if !(1..=20).contains(&self.prefetch_count)
+            || self.prefetch_after_seconds > 3600
             || self.bytes_per_second > 1024 * 1024 * 1024
             || self.retention_seconds > 365 * 86400
             || self.playback_cooldown_seconds > 3600
@@ -333,7 +338,16 @@ impl Engine {
                     )?;
                 }
             }
-            if policy.auto_prefetch {
+            let eligible = {
+                let active = self.policy.read().unwrap();
+                self.prefetch_watch.lock().unwrap().eligible(
+                    &work.session_id,
+                    &work.item_guid,
+                    &active,
+                    Instant::now(),
+                )
+            };
+            if eligible {
                 for item in self
                     .next_episodes(
                         &session,
@@ -351,7 +365,7 @@ impl Engine {
                     {
                         continue;
                     }
-                    self.queue_catalog_item(&session, &item.guid, false, false)
+                    self.queue_catalog_item(&session, &item.guid, Some(&work.item_guid), false)
                         .await?;
                 }
             }

@@ -1,10 +1,11 @@
 use std::{
     collections::{HashMap, VecDeque},
+    net::IpAddr,
     sync::{
         Arc, Mutex, RwLock,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
@@ -61,10 +62,13 @@ pub struct Engine {
     pub client: reqwest::Client,
     pub token: String,
     pub observations: Mutex<VecDeque<Observation>>,
+    pub proxy_requests: Mutex<crate::proxy_requests::History>,
     pub history_metadata: crate::local_history::Metadata,
     pub progress_events: Mutex<VecDeque<ProgressEvent>>,
     pub counters: Counters,
     pub transfers: Arc<crate::transfers::Transfers>,
+    pub power: crate::power::Activity,
+    pub prefetch_watch: Mutex<crate::prefetch::WatchTime>,
     pub wake: Notify,
     pub shutdown: CancellationToken,
     pub probe_lock: tokio::sync::Mutex<()>,
@@ -107,10 +111,13 @@ impl Engine {
             client,
             token,
             observations: Mutex::new(VecDeque::new()),
+            proxy_requests: Mutex::new(crate::proxy_requests::History::default()),
             history_metadata: Default::default(),
             progress_events: Mutex::new(VecDeque::new()),
             counters: Counters::default(),
             transfers: Arc::new(crate::transfers::Transfers::default()),
+            power: Default::default(),
+            prefetch_watch: Mutex::new(Default::default()),
             wake: Notify::new(),
             shutdown: CancellationToken::new(),
             probe_lock: tokio::sync::Mutex::new(()),
@@ -122,9 +129,14 @@ impl Engine {
         }))
     }
 
-    pub fn observe(self: &Arc<Self>, source: Source, status: u16, headers: &HeaderMap) {
+    pub fn observe(
+        self: &Arc<Self>,
+        source: Source,
+        status: u16,
+        headers: &HeaderMap,
+    ) -> Option<String> {
         if self.policy.read().unwrap().incognito {
-            return;
+            return None;
         }
         if status == 206 {
             self.warm_routes(&source);
@@ -133,22 +145,31 @@ impl Engine {
         let total = text_header(headers, "content-range")
             .and_then(|v| parse_content_range(&v).map(|r| r.2))
             .or_else(|| text_header(headers, "content-length").and_then(|v| v.parse().ok()));
+        let cacheable = matches!(status, 200 | 206) && media_candidate(headers, &source.target);
         let observation = Observation {
             id: id.clone(),
             path: source.display_path(),
             status,
             content_type: text_header(headers, "content-type"),
             total,
-            cacheable: matches!(status, 200 | 206) && media_candidate(headers, &source.target),
+            cacheable,
             source,
         };
         let mut observations = self.observations.lock().unwrap();
         observations.retain(|old| old.id != id);
         observations.push_front(observation);
         observations.truncate(100);
+        cacheable.then_some(id)
     }
 
-    pub fn record_progress(&self, source: &Source, body: Option<Vec<u8>>, status: u16) {
+    pub fn record_progress(
+        &self,
+        source: &Source,
+        body: Option<Vec<u8>>,
+        status: u16,
+        peer: IpAddr,
+        received_at: Instant,
+    ) {
         let policy = self.policy.read().unwrap();
         if !policy.syncs_history() {
             return;
@@ -186,6 +207,9 @@ impl Engine {
             && crate::library::valid_guid(item)
             && let Ok(Some(session)) = self.store.save_session(source)
         {
+            if let Some(position) = event.position {
+                self.report_playback(&session.id, item, position, peer, received_at, &policy);
+            }
             let _ = self.store.note_playback(&session.id, item);
             self.scheduler_wake.notify_one();
         }
@@ -198,6 +222,26 @@ impl Engine {
         let mut events = self.progress_events.lock().unwrap();
         events.push_front(event);
         events.truncate(100);
+    }
+
+    pub fn report_playback(
+        &self,
+        session: &str,
+        item: &str,
+        position: f64,
+        peer: IpAddr,
+        received_at: Instant,
+        policy: &Policy,
+    ) {
+        if policy.auto_prefetch {
+            self.prefetch_watch
+                .lock()
+                .unwrap()
+                .report(session, peer, item, position, received_at);
+        }
+        if policy.prevent_idle_sleep {
+            self.power.report(session, item, position);
+        }
     }
 
     pub async fn revalidate(&self, source: &Source, item: &Download) -> Option<HeaderMap> {
@@ -525,6 +569,7 @@ impl Engine {
         self.store.progress(item)?;
         let growing = tokio::sync::OwnedRwLockWriteGuard::downgrade(exclusive);
         self.transfers.download_progress(&item.id, item.downloaded);
+        let _download = self.power.download();
         let mut stream = response.bytes_stream();
         let mut saved_at = item.downloaded;
         let mut saved_time = std::time::Instant::now();

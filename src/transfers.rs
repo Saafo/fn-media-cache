@@ -40,6 +40,10 @@ fn now_ms() -> u64 {
     crate::scheduler::now().max(0) as u64 * 1000
 }
 impl Transfers {
+    pub fn playback_generation(&self) -> u64 {
+        self.state.lock().unwrap().generation
+    }
+
     pub fn file_gate(&self, id: &str) -> Arc<RwLock<()>> {
         self.gates
             .lock()

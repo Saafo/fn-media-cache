@@ -361,6 +361,7 @@ impl Controller {
             || ![
                 "stats",
                 "observations",
+                "proxy-requests",
                 "downloads",
                 "routes",
                 "sessions",

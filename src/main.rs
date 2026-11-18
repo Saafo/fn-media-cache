@@ -6,10 +6,14 @@ mod fntv;
 mod library;
 mod local_history;
 mod logging;
+mod media_trace;
 mod partial_cache;
+mod power;
+mod prefetch;
 mod privacy;
 mod probe;
 mod protocol;
+mod proxy_requests;
 mod recovery;
 mod routes;
 mod scheduler;
@@ -22,6 +26,7 @@ mod transfers;
 use std::{
     fs,
     io::Write,
+    net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -174,9 +179,13 @@ async fn serve(config: Config, parent_pipe: bool) -> Result<()> {
     }
     let cancel = engine.shutdown.clone();
     let mut proxy = tokio::spawn(
-        axum::serve(proxy_listener, server::proxy_router(Arc::clone(&engine)))
-            .with_graceful_shutdown(cancel.clone().cancelled_owned())
-            .into_future(),
+        axum::serve(
+            proxy_listener,
+            server::proxy_router(Arc::clone(&engine))
+                .into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(cancel.clone().cancelled_owned())
+        .into_future(),
     );
     let mut admin = tokio::spawn(
         axum::serve(admin_listener, server::admin_router(Arc::clone(&engine)))
@@ -185,6 +194,7 @@ async fn serve(config: Config, parent_pipe: bool) -> Result<()> {
     );
     let mut worker = tokio::spawn(engine.clone().worker());
     let mut scheduler = tokio::spawn(engine.clone().scheduler());
+    let power = tokio::spawn(power::monitor(engine.clone()));
     let result = tokio::select! {
         result = shutdown_signal() => result.context("cannot listen for shutdown signal"),
         result = parent_closed(parent_pipe) => result.context("cannot watch desktop parent pipe"),
@@ -194,6 +204,7 @@ async fn serve(config: Config, parent_pipe: bool) -> Result<()> {
         _ = &mut scheduler => Err(anyhow::anyhow!("scheduler stopped unexpectedly")),
     };
     cancel.cancel();
+    let _ = power.await;
     event!("service shutdown requested; ok={}", result.is_ok());
     // Avoid waiting forever for an abandoned client. Drop aborts only after cooperative shutdown.
     let _ = tokio::time::timeout(Duration::from_secs(5), async {
