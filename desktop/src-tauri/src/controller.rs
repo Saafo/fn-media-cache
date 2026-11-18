@@ -11,12 +11,18 @@ use std::{
     sync::Mutex,
     time::Duration,
 };
+use tokio::{
+    io::{AsyncBufReadExt, BufReader},
+    process::Child,
+    sync::watch,
+};
 
 pub struct Controller {
-    pub root: PathBuf,
+    root: PathBuf,
     daemon: PathBuf,
-    label: String,
-    gate: tokio::sync::Mutex<()>,
+    development: bool,
+    child: tokio::sync::Mutex<Option<Child>>,
+    quitting: watch::Sender<bool>,
     error: Mutex<Option<String>>,
     client: reqwest::Client,
 }
@@ -27,7 +33,6 @@ pub struct Settings {
     pub upstream_alternates: Vec<String>,
     pub proxy_port: u16,
     pub lan_access: bool,
-    pub auto_start: bool,
     pub log_max_megabytes: u64,
     pub log_keep_files: usize,
 }
@@ -54,14 +59,6 @@ fn digest(value: &[u8]) -> String {
         .map(|b| format!("{b:02x}"))
         .collect()
 }
-fn xml(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
-
 fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     let temp = path.with_extension("new");
     fs::write(&temp, bytes)?;
@@ -98,25 +95,14 @@ impl Controller {
         }
     }
     pub fn new(root: PathBuf, daemon: PathBuf, development: bool) -> Result<Self> {
+        let root = std::path::absolute(root)?;
         private_dir(&root)?;
-        let label = if development {
-            format!(
-                "local.fn-media-cache.dev.{}",
-                &digest(root.to_string_lossy().as_bytes())[..10]
-            )
-        } else if root.file_name().is_some_and(|name| name == "FN Media")
-            && root.join("fn-media.toml").is_file()
-        {
-            // Adopt the existing job and data without creating a second service.
-            "local.fn-media".into()
-        } else {
-            "local.fn-media-cache".into()
-        };
         Ok(Self {
             root,
             daemon,
-            label,
-            gate: tokio::sync::Mutex::new(()),
+            development,
+            child: tokio::sync::Mutex::new(None),
+            quitting: watch::Sender::new(false),
             error: Mutex::new(None),
             client: reqwest::Client::builder()
                 .no_proxy()
@@ -130,25 +116,18 @@ impl Controller {
     fn config(&self) -> Result<Config> {
         Config::load(&self.config_path())
     }
-    fn auto_start(&self) -> bool {
-        fs::read(self.root.join("desktop-settings.json"))
-            .ok()
-            .and_then(|v| serde_json::from_slice::<serde_json::Value>(&v).ok())
-            .and_then(|v| v.get("auto_start").and_then(|v| v.as_bool()))
-            .unwrap_or(true)
-    }
     pub async fn status(&self) -> Status {
+        self.status_locked(&mut *self.child.lock().await)
+    }
+    fn status_locked(&self, child: &mut Option<Child>) -> Status {
+        if let Some(process) = child
+            && let Ok(Some(status)) = process.try_wait()
+        {
+            self.audit(&format!("service exited unexpectedly: {status}"));
+            *self.error.lock().unwrap() = Some("后台已退出，请检查日志后重新打开应用。".into());
+            *child = None;
+        }
         let config = self.config().ok();
-        let running = if let Some(config) = &config {
-            self.client
-                .get(format!("http://{}/health", config.admin_listen))
-                .timeout(Duration::from_secs(2))
-                .send()
-                .await
-                .is_ok_and(|r| r.status().is_success())
-        } else {
-            false
-        };
         let settings = config
             .as_ref()
             .map(|c| Settings {
@@ -156,7 +135,6 @@ impl Controller {
                 upstream_alternates: c.upstream_alternates.clone(),
                 proxy_port: c.proxy_listen.port(),
                 lan_access: !c.proxy_listen.ip().is_loopback(),
-                auto_start: self.auto_start(),
                 log_max_megabytes: c.log_max_bytes / 1048576,
                 log_keep_files: c.log_keep_files,
             })
@@ -165,13 +143,12 @@ impl Controller {
                 upstream_alternates: vec![],
                 proxy_port: 28005,
                 lan_access: false,
-                auto_start: true,
                 log_max_megabytes: 8,
                 log_keep_files: 3,
             });
         Status {
             configured: config.is_some(),
-            running,
+            running: child.is_some(),
             proxy_address: config
                 .as_ref()
                 .map(|c| format!("http://{}", c.proxy_listen))
@@ -185,15 +162,18 @@ impl Controller {
         }
     }
     pub async fn save(&self, input: Settings) -> Result<Status> {
-        let _guard = self.gate.lock().await;
-        let result = self.save_locked(input).await;
+        let mut child = self.child.lock().await;
+        if *self.quitting.borrow() {
+            bail!("应用正在退出");
+        }
+        let result = self.save_locked(input, &mut child).await;
         if result.is_err() {
             *self.error.lock().unwrap() =
                 Some("配置或后台启动失败，请检查地址、端口与日志。".into());
         }
         result
     }
-    async fn save_locked(&self, input: Settings) -> Result<Status> {
+    async fn save_locked(&self, input: Settings, child: &mut Option<Child>) -> Result<Status> {
         if input.proxy_port == 0 || input.proxy_port == 28006 {
             bail!("代理端口无效或与管理端口相同");
         }
@@ -242,152 +222,131 @@ impl Controller {
             });
         }
         paths.insert(config.upstream.clone(), config.data_dir.clone());
-        self.stop_locked()?;
-        self.wait_stopped().await?;
+        self.stop_child(child).await?;
         write_private(&profiles, &serde_json::to_vec_pretty(&paths)?)?;
         write_private(
             &self.config_path(),
             toml::to_string_pretty(&config)?.as_bytes(),
         )?;
-        write_private(
-            &self.root.join("desktop-settings.json"),
-            &serde_json::to_vec(&serde_json::json!({"auto_start":input.auto_start}))?,
-        )?;
-        self.start_locked().await?;
+        self.start_child(child).await?;
         self.audit("configuration saved and service started");
-        Ok(self.status().await)
+        Ok(self.status_locked(child))
     }
-    pub async fn start(&self) -> Result<Status> {
-        let _guard = self.gate.lock().await;
-        self.audit("service start requested");
-        if let Err(error) = self.start_locked().await {
-            *self.error.lock().unwrap() = Some("后台启动失败，请检查配置和端口占用。".into());
-            return Err(error);
+    pub async fn start_on_launch(&self) {
+        let mut child = self.child.lock().await;
+        if !self.config_path().exists() || child.is_some() || *self.quitting.borrow() {
+            return;
         }
-        Ok(self.status().await)
+        if let Err(error) = self.start_child(&mut child).await {
+            self.audit(&format!("service startup failed: {error}"));
+            *self.error.lock().unwrap() = Some(format!("后台启动失败：{error}"));
+        }
     }
-    async fn start_locked(&self) -> Result<()> {
+    async fn start_child(&self, child: &mut Option<Child>) -> Result<()> {
+        let mut quitting = self.quitting.subscribe();
+        if *quitting.borrow() {
+            bail!("应用正在退出");
+        }
         self.config()?;
-        private_dir(&self.root.join("bin"))?;
-        private_dir(&self.root.join("logs"))?;
-        let binary = self.root.join("bin/fn-media-cache");
-        let bytes = fs::read(&self.daemon).context("安装包缺少后台程序")?;
-        let changed = fs::read(&binary)
-            .ok()
-            .is_none_or(|old| digest(&old) != digest(&bytes));
-        if self.status().await.running {
-            if !changed {
-                *self.error.lock().unwrap() = None;
-                return Ok(());
-            }
-            self.stop_locked()?;
-            self.wait_stopped().await?;
+        if !self.daemon.is_file() {
+            bail!("安装包缺少后台程序");
         }
-        if changed {
-            write_private(&binary, &bytes)?;
+        #[cfg(target_os = "macos")]
+        if !self.development {
+            self.retire_launch_agent().await?;
         }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&binary, fs::Permissions::from_mode(0o755))?;
-        }
-        self.install_job(&binary)?;
-        for _ in 0..60 {
-            if self.status().await.running {
-                *self.error.lock().unwrap() = None;
-                self.audit("service ready");
-                return Ok(());
-            }
-            tokio::time::sleep(Duration::from_millis(250)).await;
-        }
-        bail!("后台未能及时启动")
-    }
-    pub async fn stop(&self) -> Result<Status> {
-        let _guard = self.gate.lock().await;
-        self.stop_locked()?;
-        self.wait_stopped().await?;
-        self.audit("service stopped");
-        Ok(self.status().await)
-    }
-    async fn wait_stopped(&self) -> Result<()> {
-        for _ in 0..40 {
-            if !self.status().await.running {
-                return Ok(());
-            }
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
-        bail!("服务端口仍被占用，未启动第二个进程")
-    }
-    #[cfg(target_os = "macos")]
-    fn domain(&self) -> Result<String> {
-        let output = Command::new("/usr/bin/id").arg("-u").output()?;
-        let uid = String::from_utf8(output.stdout)?.trim().parse::<u32>()?;
-        Ok(format!("gui/{uid}"))
-    }
-    #[cfg(target_os = "macos")]
-    fn stop_locked(&self) -> Result<()> {
-        let domain = self.domain()?;
-        let _ = Command::new("/bin/launchctl")
-            .args(["bootout", &format!("{domain}/{}", self.label)])
-            .stdout(Stdio::null())
+        let mut command = tokio::process::Command::new(&self.daemon);
+        command
+            .args(["serve", "--parent-pipe", "--config"])
+            .arg(self.config_path())
+            .current_dir(&self.root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .status()?;
+            .kill_on_drop(true);
+        #[cfg(windows)]
+        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        let mut process = command.spawn().context("无法启动安装包内的后台程序")?;
+        let mut stdout = BufReader::new(process.stdout.take().expect("child stdout pipe"));
+        let mut line = String::new();
+        let ready = tokio::select! {
+            result = tokio::time::timeout(Duration::from_secs(8), stdout.read_line(&mut line)) => {
+                result.is_ok_and(|read| read.is_ok()) && line.trim_end() == "ready"
+            }
+            _ = quitting.wait_for(|quitting| *quitting) => false,
+        };
+        *child = Some(process);
+        if !ready {
+            self.stop_child(child).await?;
+            bail!("后台未能启动，请检查配置、端口占用与日志");
+        }
+        *self.error.lock().unwrap() = None;
+        self.audit("service ready");
         Ok(())
     }
-    #[cfg(not(target_os = "macos"))]
-    fn stop_locked(&self) -> Result<()> {
-        bail!("本版本的后台托管目前支持 macOS")
+
+    pub fn begin_quit(&self) -> bool {
+        !self.quitting.send_replace(true)
+    }
+
+    pub async fn shutdown(&self) {
+        if let Err(error) = self.stop_child(&mut *self.child.lock().await).await {
+            self.audit(&format!("service shutdown failed: {error}"));
+        }
+    }
+
+    async fn stop_child(&self, child: &mut Option<Child>) -> Result<()> {
+        let Some(mut process) = child.take() else {
+            return Ok(());
+        };
+        drop(process.stdin.take());
+        match tokio::time::timeout(Duration::from_secs(7), process.wait()).await {
+            Ok(status) => self.audit(&format!("service stopped: {}", status?)),
+            Err(_) => {
+                process.kill().await?;
+                self.audit("service exceeded shutdown deadline and was terminated");
+            }
+        }
+        Ok(())
     }
 
     #[cfg(target_os = "macos")]
-    fn install_job(&self, binary: &Path) -> Result<()> {
-        let domain = self.domain()?;
+    async fn retire_launch_agent(&self) -> Result<()> {
+        let label = if self.root.file_name().is_some_and(|name| name == "FN Media") {
+            "local.fn-media"
+        } else {
+            "local.fn-media-cache"
+        };
         let home = PathBuf::from(std::env::var_os("HOME").context("找不到用户目录")?);
-        let directory = home.join("Library/LaunchAgents");
-        fs::create_dir_all(&directory)?;
-        let plist = directory.join(format!("{}.plist", self.label));
-        let text = format!(
-            r#"<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>Label</key><string>{}</string><key>ProgramArguments</key><array><string>{}</string><string>serve</string><string>--config</string><string>{}</string></array><key>WorkingDirectory</key><string>{}</string><key>RunAtLoad</key><{} /><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>10</integer><key>Umask</key><integer>63</integer><key>EnvironmentVariables</key><dict><key>FN_MEDIA_CACHE_MANAGED</key><string>1</string></dict><key>StandardOutPath</key><string>{}</string><key>StandardErrorPath</key><string>{}</string></dict></plist>"#,
-            xml(&self.label),
-            xml(&binary.to_string_lossy()),
-            xml(&self.config_path().to_string_lossy()),
-            xml(&self.root.to_string_lossy()),
-            if self.auto_start() { "true" } else { "false" },
-            xml("/dev/null"),
-            xml("/dev/null")
-        );
-        write_private(&plist, text.as_bytes())?;
-        let loaded = Command::new("/bin/launchctl")
-            .args(["print", &format!("{domain}/{}", self.label)])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()?
-            .success();
-        if !loaded
-            && !Command::new("/bin/launchctl")
-                .args(["bootstrap", &domain])
-                .arg(&plist)
+        let plist = home
+            .join("Library/LaunchAgents")
+            .join(format!("{label}.plist"));
+        if !plist.try_exists()? {
+            return Ok(());
+        }
+        let output = tokio::process::Command::new("/usr/bin/id")
+            .arg("-u")
+            .output()
+            .await?;
+        let uid = String::from_utf8(output.stdout)?.trim().parse::<u32>()?;
+        let service = format!("gui/{uid}/{label}");
+        let launchctl = |action: &str| {
+            let mut command = tokio::process::Command::new("/bin/launchctl");
+            command
+                .args([action, &service])
                 .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()?
-                .success()
+                .stderr(Stdio::null());
+            command
+        };
+        if launchctl("print").status().await?.success()
+            && !launchctl("bootout").status().await?.success()
         {
-            bail!("无法安装用户级后台任务");
+            bail!("无法停止旧版后台任务");
         }
-        if !Command::new("/bin/launchctl")
-            .args(["kickstart", &format!("{domain}/{}", self.label)])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()?
-            .success()
-        {
-            bail!("无法启动用户级后台任务");
-        }
+        fs::rename(&plist, self.root.join("previous-launch-agent.plist"))
+            .context("无法移出旧版后台的启动项")?;
+        self.audit("legacy launch agent retired");
         Ok(())
-    }
-    #[cfg(not(target_os = "macos"))]
-    fn install_job(&self, _binary: &Path) -> Result<()> {
-        bail!("本版本的后台托管目前支持 macOS")
     }
 
     pub async fn admin(

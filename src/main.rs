@@ -55,6 +55,9 @@ enum Command {
         /// Defaults to fn-media-cache.toml, with support for an existing fn-media.toml.
         #[arg(long)]
         config: Option<PathBuf>,
+        /// Desktop child protocol: announce readiness on stdout and stop when stdin closes.
+        #[arg(long, hide = true)]
+        parent_pipe: bool,
     },
     /// Check the configured local management and proxy endpoints without credentials.
     Doctor {
@@ -83,9 +86,12 @@ async fn main() -> Result<()> {
             private_file(&config)?;
             println!("Created {}", config.display());
         }
-        Command::Serve { config } => {
+        Command::Serve {
+            config,
+            parent_pipe,
+        } => {
             let config = config.unwrap_or_else(|| config::configuration_path(Path::new(".")));
-            if let Err(error) = serve(Config::load(&config)?).await {
+            if let Err(error) = serve(Config::load(&config)?, parent_pipe).await {
                 event!("service stopped with error: {error}");
                 return Err(error);
             }
@@ -105,7 +111,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn serve(config: Config) -> Result<()> {
+async fn serve(config: Config, parent_pipe: bool) -> Result<()> {
     private_dir(&config.data_dir)?;
     private_dir(&config.data_dir.join("cache"))?;
     private_dir(&config.data_dir.join("logs"))?;
@@ -154,7 +160,11 @@ async fn serve(config: Config) -> Result<()> {
         .await
         .context("cannot bind management listener")?;
     let engine = Engine::new(config, store, token)?;
-    if std::env::var_os("FN_MEDIA_CACHE_MANAGED").is_none()
+    if parent_pipe {
+        let mut stdout = std::io::stdout().lock();
+        writeln!(stdout, "ready")?;
+        stdout.flush()?;
+    } else if std::env::var_os("FN_MEDIA_CACHE_MANAGED").is_none()
         && std::env::var_os("FN_MEDIA_MANAGED").is_none()
     {
         println!("Proxy: http://{}", proxy_listener.local_addr()?);
@@ -177,6 +187,7 @@ async fn serve(config: Config) -> Result<()> {
     let mut scheduler = tokio::spawn(engine.clone().scheduler());
     let result = tokio::select! {
         result = shutdown_signal() => result.context("cannot listen for shutdown signal"),
+        result = parent_closed(parent_pipe) => result.context("cannot watch desktop parent pipe"),
         result = &mut proxy => result.context("proxy task failed").and_then(|r| r.context("proxy stopped")),
         result = &mut admin => result.context("management task failed").and_then(|r| r.context("management stopped")),
         _ = &mut worker => Err(anyhow::anyhow!("download worker stopped unexpectedly")),
@@ -201,6 +212,21 @@ async fn serve(config: Config) -> Result<()> {
     scheduler.abort();
     drop(lock);
     result
+}
+
+async fn parent_closed(enabled: bool) -> std::io::Result<()> {
+    if !enabled {
+        return std::future::pending().await;
+    }
+    let (closed, receiver) = tokio::sync::oneshot::channel();
+    // A detached reader will not hold the runtime open if a signal stops the service first.
+    std::thread::Builder::new()
+        .name("desktop-parent-pipe".into())
+        .spawn(move || {
+            let result = std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink());
+            let _ = closed.send(result.map(|_| ()));
+        })?;
+    receiver.await.map_err(std::io::Error::other)?
 }
 
 async fn shutdown_signal() -> std::io::Result<()> {

@@ -16,7 +16,6 @@ mod privacy;
 mod recovery;
 #[path = "cases/routes.rs"]
 mod routes;
-#[cfg(unix)]
 #[path = "cases/shutdown.rs"]
 mod shutdown;
 mod support;

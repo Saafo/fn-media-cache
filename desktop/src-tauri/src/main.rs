@@ -3,7 +3,13 @@ mod config;
 mod controller;
 
 use controller::{AdminResponse, Controller, Settings, Status};
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 use tauri::{
     Manager, State,
     menu::{Menu, MenuItem},
@@ -13,14 +19,6 @@ use tauri::{
 #[tauri::command]
 async fn service_status(state: State<'_, Arc<Controller>>) -> Result<Status, String> {
     Ok(state.status().await)
-}
-#[tauri::command]
-async fn service_start(state: State<'_, Arc<Controller>>) -> Result<Status, String> {
-    state.start().await.map_err(|e| e.to_string())
-}
-#[tauri::command]
-async fn service_stop(state: State<'_, Arc<Controller>>) -> Result<Status, String> {
-    state.stop().await.map_err(|e| e.to_string())
 }
 #[tauri::command]
 async fn save_server(
@@ -53,8 +51,6 @@ fn main() {
     let application = tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             service_status,
-            service_start,
-            service_stop,
             save_server,
             admin_request,
             open_logs
@@ -89,13 +85,12 @@ fn main() {
                 PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                     .join("../../bin/fn-media-cache-macos-arm64")
             };
-            app.manage(Arc::new(Controller::new(root, daemon, development)?));
+            let controller = Arc::new(Controller::new(root, daemon, development)?);
+            app.manage(Arc::clone(&controller));
             let items = [
                 MenuItem::with_id(app, "show", "打开 FN Media Cache", true, None::<&str>)?,
-                MenuItem::with_id(app, "start", "启动后台服务", true, None::<&str>)?,
-                MenuItem::with_id(app, "stop", "停止后台服务", true, None::<&str>)?,
                 MenuItem::with_id(app, "logs", "打开日志目录", true, None::<&str>)?,
-                MenuItem::with_id(app, "quit", "退出桌面（后台继续运行）", true, None::<&str>)?,
+                MenuItem::with_id(app, "quit", "退出 FN Media Cache", true, None::<&str>)?,
             ];
             let menu = Menu::with_items(
                 app,
@@ -107,31 +102,21 @@ fn main() {
             let mut tray = TrayIconBuilder::new()
                 .tooltip("FN Media Cache")
                 .menu(&menu)
-                .on_menu_event(|app, event| {
-                    let controller = app.state::<Arc<Controller>>().inner().clone();
-                    match event.id.as_ref() {
-                        "show" => show(app),
-                        "start" => {
-                            tauri::async_runtime::spawn(async move {
-                                let _ = controller.start().await;
-                            });
-                        }
-                        "stop" => {
-                            tauri::async_runtime::spawn(async move {
-                                let _ = controller.stop().await;
-                            });
-                        }
-                        "logs" => {
-                            let _ = controller.open_logs();
-                        }
-                        "quit" => app.exit(0),
-                        _ => {}
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => show(app),
+                    "logs" => {
+                        let _ = app.state::<Arc<Controller>>().open_logs();
                     }
+                    "quit" => app.exit(0),
+                    _ => {}
                 });
             if let Some(icon) = app.default_window_icon() {
                 tray = tray.icon(icon.clone());
             }
             tray.build(app)?;
+            tauri::async_runtime::spawn(async move {
+                controller.start_on_launch().await;
+            });
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -142,12 +127,31 @@ fn main() {
         })
         .build(tauri::generate_context!())
         .expect("desktop application failed");
-    application.run(|app, event| {
-        #[cfg(target_os = "macos")]
-        if let tauri::RunEvent::Reopen { .. } = event {
-            show(app);
+    let shutdown_complete = Arc::new(AtomicBool::new(false));
+    application.run(move |app, event| match event {
+        tauri::RunEvent::ExitRequested { api, code, .. }
+            if !shutdown_complete.load(Ordering::Acquire) =>
+        {
+            api.prevent_exit();
+            let controller = app.state::<Arc<Controller>>().inner().clone();
+            if controller.begin_quit() {
+                let app = app.clone();
+                let shutdown_complete = Arc::clone(&shutdown_complete);
+                tauri::async_runtime::spawn(async move {
+                    controller.shutdown().await;
+                    shutdown_complete.store(true, Ordering::Release);
+                    app.exit(code.unwrap_or(0));
+                });
+            }
         }
-        #[cfg(not(target_os = "macos"))]
-        let _ = (app, event);
+        tauri::RunEvent::Exit if !shutdown_complete.load(Ordering::Acquire) => {
+            // macOS's native Quit can go directly to the event loop's final exit event.
+            let controller = app.state::<Arc<Controller>>();
+            controller.begin_quit();
+            tauri::async_runtime::block_on(controller.shutdown());
+        }
+        #[cfg(target_os = "macos")]
+        tauri::RunEvent::Reopen { .. } => show(app),
+        _ => {}
     });
 }

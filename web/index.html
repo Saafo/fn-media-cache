@@ -22,20 +22,20 @@
   <h1>FN Media Cache</h1>
   <p class="muted">飞牛影视本地缓存服务 · 测试版，关闭此页面不会停止任务。</p>
   <section class="panel" id="desktop-panel" hidden>
-    <div class="toolbar"><strong id="desktop-status">正在检查后台…</strong><button id="service-start">启动后台</button><button id="service-stop">停止后台</button><button id="service-logs">打开日志目录</button></div>
-    <details id="server-settings"><summary>服务器与启动设置</summary>
+    <div class="toolbar"><strong id="desktop-status" role="status">正在检查后台…</strong><button id="service-logs">打开日志目录</button></div>
+    <details id="server-settings"><summary>服务器设置</summary>
       <div class="settings">
         <label>主服务器地址<input id="server-origin" placeholder="http://服务器:端口"></label>
         <label>备用地址（每行一个）<textarea id="server-alternates" rows="3"></textarea></label>
         <label>代理端口<input type="number" id="server-port" min="1" max="65535"></label>
         <label><span><input type="checkbox" id="server-lan"> 允许局域网播放器连接</span></label>
-        <label><span><input type="checkbox" id="server-autostart"> 登录系统后启动后台</span></label>
         <label>单个日志上限（MiB）<input type="number" id="server-log-size" min="1" max="1024"></label>
         <label>保留历史日志数<input type="number" id="server-log-keep" min="1" max="20"></label>
       </div>
-      <p class="muted">切换主服务器会使用独立缓存目录，原缓存保留。保存会重启后台。关闭窗口收起到托盘，退出桌面程序也不会停止后台。</p>
-      <button id="server-save">保存并启动</button><span id="server-message" class="muted"></span>
+      <p class="muted">切换主服务器会使用独立缓存目录，原缓存保留。保存会重新加载服务配置。</p>
+      <button id="server-save">保存</button>
     </details>
+    <p id="server-message" class="muted" role="status"></p>
   </section>
   <div class="panel" id="login"><label for="token">管理令牌</label><br><br><input id="token" type="password" autocomplete="off" placeholder="粘贴 data/admin-token 中的内容"><button id="connect">连接</button><p class="muted">令牌只留在当前页面内存中。服务启动时会显示令牌文件位置。</p></div>
   <p id="message" role="status"></p>
