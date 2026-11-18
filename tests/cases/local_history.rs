@@ -48,6 +48,68 @@ async fn list(h: &Harness, token: &str) -> Vec<Value> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn playback_readings_use_the_clients_catalog_metadata() {
+    let origin = Origin::new(Mode::Recovery);
+    let h = Harness::new(std::slice::from_ref(&origin.url)).await;
+    assert_eq!(info(&h, "one", "one").await["ts"], 900);
+    assert_eq!(h.api("/stats", None).await["playback"], json!([]));
+    assert_eq!(
+        h.get(
+            "/v/api/v1/media/range/one",
+            "other-account",
+            Some("bytes=0-15")
+        )
+        .await
+        .status,
+        206
+    );
+    assert!(h.api("/stats", None).await["playback"][0]["item"].is_null());
+    assert_eq!(
+        h.get(
+            "/v/api/v1/media/range/one?variant=direct",
+            OLD,
+            Some("bytes=0-15")
+        )
+        .await
+        .status,
+        206
+    );
+    let stats = h.api("/stats", None).await;
+    let row = stats["playback"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["item"]["guid"] == "one")
+        .unwrap();
+    assert!(row["download_id"].is_null());
+    assert_eq!(row["item"]["tv_title"], "Fixture series");
+    assert_eq!(row["item"]["season_number"], 2);
+    assert_eq!(row["item"]["episode_number"], 5);
+    assert!(!stats.to_string().contains("must-not-store"));
+
+    h.policy(json!({"incognito":true})).await;
+    info(&h, "one", "one").await;
+    assert_eq!(
+        h.get("/v/api/v1/media/range/one", OLD, Some("bytes=0-15"))
+            .await
+            .status,
+        206
+    );
+    assert_eq!(h.api("/stats", None).await["playback"], json!([]));
+    h.policy(json!({"incognito":false})).await;
+    assert_eq!(
+        h.get("/v/api/v1/media/range/one", OLD, Some("bytes=0-15"))
+            .await
+            .status,
+        206
+    );
+    assert!(h.api("/stats", None).await["playback"][0]["item"].is_null());
+    case(
+        "playback labels are captured from normal setup without download or history writes, and never in incognito mode",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn history_is_local_per_account_and_survives_restart() {
     let origin = Origin::new(Mode::Recovery);
     let mut h = Harness::new(std::slice::from_ref(&origin.url)).await;
@@ -258,6 +320,7 @@ async fn local_reports_trigger_prefetch_without_using_cloud_completion() {
         "cloud completion must not remove the cache"
     );
     h.retain("one", json!({"completed":true})).await;
-    h.wait_job(&first, "removed").await;
+    h.wait_job_absent(&first).await;
+    assert!(list(&h, TOKEN).await.iter().any(|row| row["guid"] == "one"));
     assert!(origin.snapshot().writes.is_empty());
 }

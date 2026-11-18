@@ -40,6 +40,62 @@ async fn cache_only(h: &Harness, path: &str, token: &str, range: &str) -> Reply 
     )
     .await
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn downloads_yield_only_to_origin_playback() {
+    let origin = Origin::new(Mode::Task);
+    let h = Harness::new(std::slice::from_ref(&origin.url)).await;
+    h.policy(json!({
+        "bytes_per_second": 0,
+        "retry_max_attempts": 0,
+        "playback_cooldown_seconds": 2
+    }))
+    .await;
+    let (id, path, token) = prefix(&h, &origin, "prefetched", false).await;
+    let downloaded = h.job(&id).await["downloaded"].as_u64().unwrap();
+    assert_eq!(downloaded, 65536);
+    until("playback cooldown after fixture setup", || async {
+        h.api("/automation", None).await["downloads_yielding"] == false
+    })
+    .await;
+
+    let cached = cache_only(&h, &path, &token, "bytes=0-31").await;
+    assert_eq!(cached.header("x-fn-media-cache"), "HIT");
+    let automation = h.api("/automation", None).await;
+    assert_eq!(automation["playing"], true);
+    assert_eq!(automation["downloads_yielding"], false);
+
+    origin.hold();
+    let partial = h
+        .client
+        .get(format!("{}{path}", h.proxy))
+        .header("Authorization", &token)
+        .header("Range", "bytes=0-1048575")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(partial.headers()["x-fn-media-cache"], "PARTIAL");
+    assert_eq!(h.api("/automation", None).await["downloads_yielding"], true);
+    h.command(&id, "resume").await;
+    let job = h.wait_job(&id, "downloading").await;
+    assert_eq!(job["downloaded"], downloaded);
+    assert_eq!(job["waiting_reason"], "playback");
+
+    origin.release();
+    assert_eq!(
+        partial.bytes().await.unwrap().as_ref(),
+        &native_data(Mode::Task, "prefetched", 1)[..1048576]
+    );
+    assert_eq!(h.api("/automation", None).await["downloads_yielding"], true);
+    h.wait_job(&id, "complete").await;
+    let cached = cache_only(&h, &path, &token, "bytes=0-31").await;
+    assert_eq!(cached.header("x-fn-media-cache"), "HIT");
+    assert_eq!(
+        h.api("/automation", None).await["downloads_yielding"],
+        false
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn task_controls_and_partial_playback() {
     let origin = Origin::new(Mode::Task);
@@ -249,7 +305,7 @@ async fn task_controls_and_partial_playback() {
             .iter()
             .any(|p| p["download_id"] == id)
     );
-    h.wait_job(&id, "removed").await;
+    h.wait_job_absent(&id).await;
     assert!(!h.cache(&id, "part").exists());
     case(
         "deleting during playback waits for readers, then removes the local bytes without corrupting the response",

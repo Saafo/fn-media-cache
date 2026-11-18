@@ -41,6 +41,7 @@ pub fn admin_router(engine: Arc<Engine>) -> Router {
         .route("/diagnostics", get(diagnostics))
         .route("/library/search", post(library_search))
         .route("/library/browse", post(library_browse))
+        .route("/library/series", post(library_series))
         .route("/library/download", post(library_download))
         .route("/automation", get(automation))
         .route("/automation/policy", post(save_policy))
@@ -299,6 +300,33 @@ async fn library_browse(
         .map_err(catalog_error)
 }
 
+async fn library_series(
+    State(engine): State<Arc<Engine>>,
+    Json(input): Json<CatalogQuery>,
+) -> ApiResult<crate::library::MediaItem> {
+    let session = engine
+        .session(input.session_id.as_deref())
+        .map_err(catalog_error)?;
+    let guid = input
+        .item_guid
+        .ok_or((StatusCode::BAD_REQUEST, "season item_guid required"))?;
+    let season = engine
+        .catalog_item(&session, &guid)
+        .await
+        .map_err(catalog_error)?;
+    if season.kind != "Season" || season.guid != guid {
+        return Err((StatusCode::BAD_REQUEST, "expected a season"));
+    }
+    let series = engine
+        .catalog_item(&session, &season.parent_guid)
+        .await
+        .map_err(catalog_error)?;
+    if series.kind != "TV" || series.guid != season.parent_guid {
+        return Err((StatusCode::BAD_REQUEST, "expected the parent series"));
+    }
+    Ok(Json(series))
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Selection {
@@ -334,9 +362,13 @@ async fn library_download(
 async fn automation(State(engine): State<Arc<Engine>>) -> ApiResult<serde_json::Value> {
     let policy = engine.policy.read().unwrap().clone();
     let managed = engine.store.managed().map_err(catalog_error)?;
-    Ok(Json(
-        json!({"policy":policy,"managed":managed,"playing":engine.playing(),"cache_limit_bytes":engine.cache_limit()}),
-    ))
+    Ok(Json(json!({
+        "policy": policy,
+        "managed": managed,
+        "playing": engine.playing(),
+        "downloads_yielding": engine.downloads_yielding(),
+        "cache_limit_bytes": engine.cache_limit()
+    })))
 }
 
 async fn save_policy(
@@ -418,15 +450,11 @@ async fn downloads(
         .store
         .list()
         .map(|items| {
+            let yielding = engine.downloads_yielding();
             Json(
                 items
                     .into_iter()
-                    .map(|item| {
-                        engine.transfers.download_view(
-                            item,
-                            engine.playing() && engine.policy.read().unwrap().pause_during_playback,
-                        )
-                    })
+                    .map(|item| engine.transfers.download_view(item, yielding))
                     .collect(),
             )
         })
@@ -597,17 +625,20 @@ async fn proxy(State(engine): State<Arc<Engine>>, request: Request<Body>) -> Res
     if let Some(lease) = lease {
         let media = response.status().is_success()
             && crate::protocol::media_candidate(response.headers(), &source.target);
-        let reading = (media && !engine.policy.read().unwrap().incognito).then(|| {
+        let policy = engine.policy.read().unwrap();
+        let reading = (media && !policy.incognito).then(|| {
             let download = engine
                 .store
                 .get_for_source(&source)
                 .ok()
                 .flatten()
                 .map(|d| d.id);
+            let item = engine.history_metadata.display_item(&source);
             engine
                 .transfers
-                .start(source.cache_id(), download, source.display_path())
+                .start(source.cache_id(), download, source.display_path(), item)
         });
+        drop(policy);
         let mut local_left = response
             .extensions()
             .get::<crate::transfers::LocalPrefix>()
@@ -673,8 +704,8 @@ async fn proxy_inner(engine: Arc<Engine>, request: Request<Body>) -> Response {
         return local_history::handle(&engine, &source, &parts.method, parts.uri.path(), body)
             .await;
     }
-    let local_info =
-        policy.local_history && local_history::info_request(&parts.method, parts.uri.path());
+    let play_info = !private && local_history::info_request(&parts.method, parts.uri.path());
+    let local_info = policy.local_history && play_info;
     let id = source.id();
     if matches!(parts.method, Method::GET | Method::HEAD)
         && let Some(response) =
@@ -759,7 +790,7 @@ async fn proxy_inner(engine: Arc<Engine>, request: Request<Body>) -> Response {
         }
     });
     let mut outgoing_headers = clean_headers(&parts.headers);
-    if local_info {
+    if play_info {
         outgoing_headers.insert(
             header::ACCEPT_ENCODING,
             HeaderValue::from_static("identity"),
@@ -821,8 +852,35 @@ async fn proxy_inner(engine: Arc<Engine>, request: Request<Body>) -> Response {
             started.elapsed().as_millis()
         );
     }
+    let playback = (parts.method == Method::GET
+        && matches!(status, StatusCode::OK | StatusCode::PARTIAL_CONTENT)
+        && crate::protocol::media_candidate(upstream.headers(), &source.target))
+    .then(|| engine.origin_playback());
+    let capture_info = play_info
+        && !local_info
+        && status.is_success()
+        && upstream
+            .content_length()
+            .is_none_or(|length| length <= local_history::INFO_LIMIT as u64)
+        && text_header(&headers, "content-encoding")
+            .is_none_or(|value| value.eq_ignore_ascii_case("identity"));
+    let mut capture_info = capture_info.then(|| (source.clone(), Vec::new()));
     let state = engine.clone();
     let stream = upstream.bytes_stream().map_ok(move |chunk| {
+        let _ = &playback;
+        if let Some((source, buffer)) = &mut capture_info {
+            if buffer.len() + chunk.len() > local_history::INFO_LIMIT {
+                capture_info = None;
+            } else {
+                buffer.extend_from_slice(&chunk);
+                if buffer.iter().rev().find(|byte| !byte.is_ascii_whitespace()) == Some(&b'}')
+                    && let Ok(value) = serde_json::from_slice(buffer)
+                {
+                    local_history::remember_display_info(&state, source, &value);
+                    capture_info = None;
+                }
+            }
+        }
         state
             .counters
             .origin_bytes

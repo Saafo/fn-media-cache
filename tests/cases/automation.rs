@@ -28,6 +28,13 @@ async fn catalog_prefetch_and_cleanup() {
             .await["items"][0]["guid"],
         "one"
     );
+    for season in ["season-one", "season-two"] {
+        let series = h
+            .api("/library/series", Some(json!({"item_guid":season})))
+            .await;
+        assert_eq!(series["guid"], "show");
+        assert_eq!(series["kind"], "TV");
+    }
     let first = h.queue(&["one"]).await.remove(0);
     h.wait_job(&first, "complete").await;
     assert_eq!(
@@ -124,12 +131,17 @@ async fn catalog_prefetch_and_cleanup() {
     assert_eq!(h.job(&second).await["state"], "complete");
     origin.release();
     held.bytes().await.unwrap();
-    h.wait_job(&second, "removed").await;
+    h.wait_job_absent(&second).await;
     assert!(!h.cache(&second, "bin").exists());
-    assert_eq!(h.managed("two").await["suppressed"], true);
     h.progress("one").await;
     tokio::time::sleep(Duration::from_millis(1200)).await;
-    assert_eq!(h.job(&second).await["state"], "removed");
+    assert!(
+        !h.api("/automation", None).await["managed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["item"]["guid"] == "two")
+    );
     case(
         "configurable retention honors keep and active readers, preserves first completion time, and suppresses automatic redownload",
     );
@@ -143,7 +155,7 @@ async fn catalog_prefetch_and_cleanup() {
     assert_eq!(h.job(&shared[0]).await["state"], "complete");
     h.retain("alias-two", json!({"completed":true})).await;
     h.backdate("alias-two", 4000).await;
-    h.wait_job(&shared[0], "removed").await;
+    h.wait_job_absent(&shared[0]).await;
     case("a shared media file is retained until every managed item referencing it is eligible");
 
     h.policy(json!({"cache_limit_bytes":1024})).await;
@@ -157,12 +169,30 @@ async fn catalog_prefetch_and_cleanup() {
     let policy = h.api("/automation", None).await["policy"].clone();
     h.restart(false).await;
     assert_eq!(h.api("/automation", None).await["policy"], policy);
-    assert_eq!(h.managed("two").await["suppressed"], true);
-    h.retain("two", json!({"completed":false})).await;
+    assert_eq!(
+        h.db()
+            .query_row(
+                "SELECT COUNT(*) FROM prefetch_suppressions WHERE item_guid='two'",
+                [],
+                |row| row.get::<_, u32>(0),
+            )
+            .unwrap(),
+        1
+    );
+    let replacement = h.queue(&["two"]).await.remove(0);
+    assert_ne!(replacement, second);
     assert_eq!(h.managed("two").await["suppressed"], false);
-    assert!(h.managed("two").await["completed_at"].is_null());
-    assert_eq!(h.queue(&["two"]).await[0], second);
-    h.wait_job(&second, "complete").await;
+    h.wait_job(&replacement, "complete").await;
+    assert_eq!(
+        h.db()
+            .query_row(
+                "SELECT COUNT(*) FROM prefetch_suppressions WHERE item_guid='two'",
+                [],
+                |row| row.get::<_, u32>(0),
+            )
+            .unwrap(),
+        0
+    );
     assert!(
         origin
             .snapshot()
@@ -174,6 +204,8 @@ async fn catalog_prefetch_and_cleanup() {
         "policy and tombstones survive restart; explicit re-download works; local completion and cleanup never write upstream state",
     );
     h.policy(json!({"cleanup_enabled":false})).await;
+    let legacy = h.queue(&["alias-one"]).await.remove(0);
+    h.wait_job(&legacy, "complete").await;
     h.stop(false).await;
     h.db()
         .execute(
@@ -187,8 +219,39 @@ async fn catalog_prefetch_and_cleanup() {
             [&first],
         )
         .unwrap();
+    // Simulate one legacy task whose cache is gone and another with a file still present.
+    fs::remove_file(h.cache(&legacy, "bin")).unwrap();
+    for id in [&legacy, &space] {
+        h.db()
+            .execute(
+                "UPDATE downloads SET state='removed',downloaded=0 WHERE id=?1",
+                [id],
+            )
+            .unwrap();
+        h.db()
+            .execute(
+                "UPDATE managed_media SET suppressed=1 WHERE download_id=?1",
+                [id],
+            )
+            .unwrap();
+    }
     h.start().await;
-    h.wait_job(&first, "removed").await;
+    h.wait_job_absent(&first).await;
     assert!(!h.cache(&first, "bin").exists());
-    case("restart finishes an already committed local deletion even after cleanup policy changes");
+    assert!(h.find_job(&legacy).await.is_none());
+    assert!(h.find_job(&space).await.is_some());
+    assert!(h.cache(&space, "bin").exists());
+    assert_eq!(
+        h.db()
+            .query_row(
+                "SELECT COUNT(*) FROM prefetch_suppressions WHERE item_guid='alias-one'",
+                [],
+                |row| row.get::<_, u32>(0),
+            )
+            .unwrap(),
+        1
+    );
+    case(
+        "restart finishes pending deletion and purges empty legacy tasks while preserving existing files",
+    );
 }

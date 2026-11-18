@@ -202,17 +202,52 @@ impl Metadata {
     }
 
     fn item_for_media(&self, source: &Source, media: &str) -> Option<String> {
+        self.with_media(source, media, |guid, _| guid.to_owned())
+    }
+
+    pub fn display_item(&self, source: &Source) -> Option<crate::library::MediaItem> {
+        let media =
+            privacy::endpoint(source.target.split('?').next()?)?.strip_prefix("media/range/")?;
+        if !valid_guid(media) {
+            return None;
+        }
+        self.with_media(source, media, |guid, info| {
+            let mut item = info.clone();
+            item["guid"] = json!(guid);
+            crate::library::MediaItem::parse(&item).ok()
+        })?
+    }
+
+    fn with_media<T>(
+        &self,
+        source: &Source,
+        media: &str,
+        read: impl FnOnce(&str, &Value) -> T,
+    ) -> Option<T> {
         let key = credential_key(source);
         let entries = self.0.lock().unwrap();
         let mut matches = entries
             .iter()
             .filter(|(owner, _, info)| owner == &key && info["media_guid"] == media);
-        let (_, guid, _) = matches.next()?;
-        matches.next().is_none().then(|| guid.clone())
+        let (_, guid, info) = matches.next()?;
+        matches.next().is_none().then(|| read(guid, info))
     }
 
     pub fn clear(&self) {
         self.0.lock().unwrap().clear();
+    }
+}
+
+pub fn remember_display_info(engine: &Engine, source: &Source, body: &Value) {
+    let policy = engine.policy.read().unwrap();
+    if policy.syncs_history()
+        && has_credentials(source)
+        && body["code"] == 0
+        && let Some(item) = body["data"]["guid"].as_str().filter(|id| valid_guid(id))
+    {
+        engine
+            .history_metadata
+            .remember(source, item, recent_metadata(&body["data"]));
     }
 }
 

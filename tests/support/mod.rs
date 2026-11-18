@@ -278,14 +278,16 @@ impl Harness {
         policy
     }
     pub async fn job(&self, id: &str) -> Value {
+        self.find_job(id).await.expect("download task exists")
+    }
+    pub async fn find_job(&self, id: &str) -> Option<Value> {
         self.api("/downloads", None)
             .await
             .as_array()
             .unwrap()
             .iter()
             .find(|v| v["id"] == id)
-            .unwrap()
-            .clone()
+            .cloned()
     }
     pub async fn wait_job(&self, id: &str, state: &str) -> Value {
         until(&format!("{id} to become {state}"), || async {
@@ -293,6 +295,12 @@ impl Harness {
         })
         .await;
         self.job(id).await
+    }
+    pub async fn wait_job_absent(&self, id: &str) {
+        until("deleted task to leave the downloads list", || async {
+            self.find_job(id).await.is_none()
+        })
+        .await;
     }
     pub async fn command(&self, id: &str, command: &str) {
         self.api(&format!("/downloads/{id}/{command}"), Some(json!({})))

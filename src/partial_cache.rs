@@ -197,8 +197,11 @@ pub async fn cached_prefix(
                     .fetch_add(chunk.len() as u64, Ordering::Relaxed);
                 chunk
             });
+        let playback = missing.then(|| engine.origin_playback());
         let stream = local.chain(remote).map(move |chunk| {
             let _ = &gate;
+            // The upstream response can already be buffering while we serve the local prefix.
+            let _ = &playback;
             chunk
         });
         *response.body_mut() = Body::from_stream(stream);

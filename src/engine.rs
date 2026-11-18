@@ -73,6 +73,7 @@ pub struct Engine {
     pub scheduler_wake: Arc<Notify>,
     pub cache_uses: Arc<Mutex<HashMap<String, usize>>>,
     pub playback_activity: Arc<Mutex<PlaybackActivity>>,
+    pub origin_playback_activity: Arc<Mutex<PlaybackActivity>>,
 }
 
 #[derive(Debug)]
@@ -117,6 +118,7 @@ impl Engine {
             scheduler_wake: Arc::new(Notify::new()),
             cache_uses: Arc::new(Mutex::new(HashMap::new())),
             playback_activity: Arc::new(Mutex::new(PlaybackActivity::default())),
+            origin_playback_activity: Arc::new(Mutex::new(PlaybackActivity::default())),
         }))
     }
 

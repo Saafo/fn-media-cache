@@ -21,7 +21,7 @@ type NumericKey = Exclude<keyof Policy, 'incognito' | 'local_history' | 'auto_pr
 type NumberField = [key: NumericKey, label: string, min: number, max: number | undefined, scale?: number]
 const downloadFields: NumberField[] = [
   ['bytes_per_second', '限速（MiB/s，0 为不限速）', 0, 1024, MiB],
-  ['playback_cooldown_seconds', '播放后等待（秒）', 0, 3600],
+  ['playback_cooldown_seconds', '回源结束后等待（秒）', 0, 3600],
   ['prefetch_count', '预取集数', 1, 20],
 ]
 const cacheFields: NumberField[] = [
@@ -167,9 +167,10 @@ async function saveServer() {
         <label v-for="[key, label, min, max, scale] in downloadFields" :key="key">
           {{ label }}<input v-model.number="numbers[key]" type="number" :min="min" :max="max" :step="scale ? 'any' : 1" required>
         </label>
-        <label><span><input v-model="policy.pause_during_playback" type="checkbox">播放时暂停下载</span></label>
+        <label><span><input v-model="policy.pause_during_playback" type="checkbox" aria-describedby="playback-yield-note">播放回源时暂停下载</span></label>
         <label><span><input v-model="policy.auto_prefetch" type="checkbox">自动预取后续剧集</span></label>
       </div>
+      <p id="playback-yield-note" class="hint settings-note">从飞牛读取视频时暂停后台下载。只读本地缓存时，下载照常。</p>
       <p v-if="historyNote" class="hint settings-note">{{ historyNote }}</p>
       <h2 class="settings-group">缓存</h2>
       <div class="settings">

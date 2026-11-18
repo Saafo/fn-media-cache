@@ -8,14 +8,14 @@ import LibraryView from './LibraryView.vue'
 import SettingsView from './SettingsView.vue'
 
 const pages = [
-  ['tasks', '下载任务'],
   ['overview', '运行总览'],
+  ['tasks', '下载任务'],
   ['library', '媒体库'],
   ['settings', '设置'],
 ] as const
 type Page = typeof pages[number][0]
 
-const page = ref<Page>('tasks')
+const page = ref<Page>('overview')
 const tokenInput = ref('')
 const message = ref('')
 const connectionError = ref('')
@@ -102,7 +102,7 @@ function applyDesktop(status: DesktopStatus | undefined, restarted = false) {
   const firstStatus = !desktop.value
   if (Boolean(desktop.value?.running) !== Boolean(status?.running) || restarted) invalidate()
   desktop.value = status
-  if (firstStatus && status && !status.configured && page.value === 'tasks') choose('settings')
+  if (firstStatus && status && !status.configured && page.value === 'overview') choose('settings')
   if (status?.running) void refresh()
 }
 
@@ -169,6 +169,7 @@ onUnmounted(() => {
       <OverviewView
         v-show="page === 'overview'" :visible="page === 'overview'" :snapshot="snapshot"
         :can-open-logs="isDesktop && Boolean(desktop?.configured)" @refresh="refresh(true)" @notice="report"
+        @show-tasks="choose('tasks')"
       />
       <LibraryView
         v-if="snapshot" v-show="page === 'library'" :visible="page === 'library'" :snapshot="snapshot"

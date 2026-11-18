@@ -1,5 +1,5 @@
 //! Transient transfer measurements and per-file generation guards. No playback history is persisted.
-use crate::store::Download;
+use crate::{library::MediaItem, store::Download};
 use serde::Serialize;
 use std::{
     collections::{HashMap, VecDeque},
@@ -13,6 +13,8 @@ pub struct Playback {
     pub id: String,
     pub download_id: Option<String>,
     pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub item: Option<MediaItem>,
     pub local_bytes: u64,
     pub upstream_bytes: u64,
     pub active_requests: usize,
@@ -56,6 +58,7 @@ impl Transfers {
         id: String,
         download_id: Option<String>,
         path: String,
+        item: Option<MediaItem>,
     ) -> Reading {
         let mut state = self.state.lock().unwrap();
         if state.playback.len() >= 100
@@ -73,12 +76,16 @@ impl Transfers {
             id: id.clone(),
             download_id: download_id.clone(),
             path,
+            item: None,
             local_bytes: 0,
             upstream_bytes: 0,
             active_requests: 0,
             last_seen_ms: now_ms(),
         });
         entry.download_id = download_id.or(entry.download_id.clone());
+        if item.is_some() {
+            entry.item = item;
+        }
         entry.active_requests += 1;
         entry.last_seen_ms = now_ms();
         Reading {

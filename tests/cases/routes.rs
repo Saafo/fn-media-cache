@@ -41,7 +41,7 @@ async fn download_route_selection() {
         "first video automatically benchmarks routes; fastest valid route wins; mismatched content and denied session are excluded",
     );
     let observation = h.api("/observations", None).await;
-    let id = observation
+    let observation_id = observation
         .as_array()
         .unwrap()
         .iter()
@@ -50,18 +50,20 @@ async fn download_route_selection() {
         .as_str()
         .unwrap()
         .to_owned();
-    h.api(
-        "/downloads",
-        Some(json!({"observation_id":id,"paused":true})),
-    )
-    .await;
+    let task = h
+        .api(
+            "/downloads",
+            Some(json!({"observation_id":observation_id,"paused":true})),
+        )
+        .await;
+    let id = task["id"].as_str().unwrap();
     let count = servers[0].snapshot().calls.len();
     let samples = h
         .api(&format!("/downloads/{id}/cache-samples"), Some(json!({})))
         .await;
     assert_eq!(samples["download_origin"], origins[1]);
     assert!(samples["downloaded_bytes"].as_u64().unwrap() <= 3 * 1024 * 1024);
-    assert_eq!(h.job(&id).await["downloaded"], 0);
+    assert_eq!(h.job(id).await["downloaded"], 0);
     assert_eq!(servers[0].snapshot().calls.len(), count);
     let reply = h
         .send(
@@ -84,10 +86,10 @@ async fn download_route_selection() {
     );
     servers[1].interrupt("movie");
     let before: Vec<_> = servers.iter().map(|s| s.snapshot().calls.len()).collect();
-    h.command(&id, "resume").await;
-    h.wait_job(&id, "complete").await;
+    h.command(id, "resume").await;
+    h.wait_job(id, "complete").await;
     assert_eq!(
-        fs::read(h.cache(&id, "bin")).unwrap(),
+        fs::read(h.cache(id, "bin")).unwrap(),
         data(2 * 1024 * 1024, None)
     );
     assert!(

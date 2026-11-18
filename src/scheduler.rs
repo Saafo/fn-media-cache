@@ -50,7 +50,7 @@ impl Default for Policy {
             incognito: false,
             local_history: false,
             prefetch_count: 2,
-            bytes_per_second: 2 * 1024 * 1024,
+            bytes_per_second: 10 * 1024 * 1024,
             pause_during_playback: true,
             cleanup_enabled: true,
             retention_seconds: 86400,
@@ -105,14 +105,37 @@ impl Policy {
 
 #[derive(Default)]
 pub struct PlaybackActivity {
-    pub active: usize,
-    pub last: Option<Instant>,
+    active: usize,
+    last: Option<Instant>,
+}
+
+impl PlaybackActivity {
+    fn start(activity: &Arc<Mutex<Self>>) -> PlaybackLease {
+        activity.lock().unwrap().active += 1;
+        PlaybackLease(activity.clone())
+    }
+
+    fn active(&self, cooldown: u64) -> bool {
+        self.active > 0
+            || self
+                .last
+                .is_some_and(|at| at.elapsed() < Duration::from_secs(cooldown))
+    }
+}
+
+pub struct PlaybackLease(Arc<Mutex<PlaybackActivity>>);
+impl Drop for PlaybackLease {
+    fn drop(&mut self) {
+        let mut activity = self.0.lock().unwrap();
+        activity.active -= 1;
+        activity.last = Some(Instant::now());
+    }
 }
 
 pub struct CacheLease {
     uses: Arc<Mutex<HashMap<String, usize>>>,
     key: String,
-    playback: Option<Arc<Mutex<PlaybackActivity>>>,
+    _playback: Option<PlaybackLease>,
     cleanup_wake: Arc<tokio::sync::Notify>,
 }
 impl Drop for CacheLease {
@@ -123,11 +146,6 @@ impl Drop for CacheLease {
             if *count == 0 {
                 uses.remove(&self.key);
             }
-        }
-        if let Some(activity) = &self.playback {
-            let mut activity = activity.lock().unwrap();
-            activity.active -= 1;
-            activity.last = Some(Instant::now());
         }
         self.cleanup_wake.notify_one();
     }
@@ -141,27 +159,31 @@ impl Engine {
             .unwrap()
             .entry(key.clone())
             .or_default() += 1;
-        let activity = playback.then(|| self.playback_activity.clone());
-        if let Some(activity) = &activity {
-            let mut a = activity.lock().unwrap();
-            a.active += 1;
-            a.last = Some(Instant::now());
-        }
         CacheLease {
             uses: self.cache_uses.clone(),
             key,
-            playback: activity,
+            _playback: playback.then(|| PlaybackActivity::start(&self.playback_activity)),
             cleanup_wake: self.scheduler_wake.clone(),
         }
     }
 
     pub fn playing(&self) -> bool {
         let cooldown = self.policy.read().unwrap().playback_cooldown_seconds;
-        let state = self.playback_activity.lock().unwrap();
-        state.active > 0
-            || state
-                .last
-                .is_some_and(|at| at.elapsed() < Duration::from_secs(cooldown))
+        self.playback_activity.lock().unwrap().active(cooldown)
+    }
+
+    pub fn origin_playback(&self) -> PlaybackLease {
+        PlaybackActivity::start(&self.origin_playback_activity)
+    }
+
+    pub fn downloads_yielding(&self) -> bool {
+        let policy = self.policy.read().unwrap();
+        policy.pause_during_playback
+            && self
+                .origin_playback_activity
+                .lock()
+                .unwrap()
+                .active(policy.playback_cooldown_seconds)
     }
 
     pub fn cache_limit(&self) -> u64 {
@@ -188,8 +210,7 @@ impl Engine {
             {
                 return Ok(false);
             }
-            let pause = self.policy.read().unwrap().pause_during_playback;
-            if !pause || !self.playing() {
+            if !self.downloads_yielding() {
                 return Ok(true);
             }
             tokio::select! { _=self.shutdown.cancelled()=>return Ok(false), _=tokio::time::sleep(Duration::from_millis(100))=>{} }

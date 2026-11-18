@@ -19,6 +19,8 @@ export interface MediaItem {
   guid: string
   title: string
   kind: string
+  parent_guid?: string
+  tv_title?: string
   season_number: number
   episode_number: number
   watched?: boolean | null
@@ -28,6 +30,7 @@ export interface ManagedMedia {
   download_id: string
   session_id: string
   item: MediaItem
+  media_guid?: string
   keep: boolean
   completed_at: number | null
 }
@@ -59,6 +62,7 @@ export interface Automation {
   policy: Policy
   managed: ManagedMedia[]
   playing: boolean
+  downloads_yielding?: boolean
   cache_limit_bytes: number
 }
 
@@ -72,6 +76,7 @@ export interface Stats {
     id: string
     download_id: string | null
     path: string
+    item?: MediaItem
     active_requests: number
     local_bytes: number
     upstream_bytes: number
@@ -150,6 +155,7 @@ interface Writes {
   '/automation/policy': [Policy, { ok: boolean }]
   '/library/search': [{ session_id: string; page: number; query: string }, CatalogPage]
   '/library/browse': [{ session_id: string; page: number; item_guid: string }, CatalogPage]
+  '/library/series': [{ session_id: string; item_guid: string }, MediaItem]
   '/library/download': [
     { session_id: string; item_guids: string[] },
     { results: { item_guid: string; ok: boolean; id?: string }[] },

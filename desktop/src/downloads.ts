@@ -1,4 +1,4 @@
-import type { Download, JobState, ManagedMedia } from './api'
+import type { Download, JobState, ManagedMedia, MediaItem } from './api'
 
 export const MiB = 1_048_576
 export const GiB = 1_073_741_824
@@ -28,6 +28,21 @@ export function duration(seconds: number | null) {
   return `约 ${(seconds / 3600).toFixed(1)} 小时`
 }
 
+export function downloadSpeed(jobs: Download[]) {
+  return jobs.reduce((total, job) => total + (job.state === 'downloading' ? job.bytes_per_second : 0), 0)
+}
+
+export function mediaTitle(item: MediaItem) {
+  const title = item.kind === 'Episode' ? item.tv_title || item.title : item.title
+  return [title, episodeNumber(item)].filter(Boolean).join(' · ')
+}
+
 export function jobTitle(job: Download, managed: ManagedMedia[]) {
-  return managed.map(entry => entry.item.title || entry.item.guid).join(' / ') || job.path
+  return [...new Set(managed.map(({ item }) => mediaTitle(item) || item.guid))].join(' / ') || job.path
+}
+
+export function episodeNumber(item?: MediaItem) {
+  if (item?.kind !== 'Episode' || !item.episode_number) return ''
+  const episode = String(item.episode_number).padStart(2, '0')
+  return item.season_number ? `S${String(item.season_number).padStart(2, '0')}E${episode}` : `第 ${item.episode_number} 集`
 }

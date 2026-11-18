@@ -132,13 +132,15 @@ impl Store {
         };
         store.initialize_automation()?;
         for item in store.list()? {
-            store.save_session(&item.source)?;
+            if item.state != "removed" || !store.prune_removed(&item)? {
+                store.save_session(&item.source)?;
+            }
         }
         Ok(store)
     }
 
     pub fn file(&self, id: &str, partial: bool) -> PathBuf {
-        // IDs originate exclusively from SHA-256, never from a caller-supplied path.
+        // Task IDs are service-generated hex strings, never caller-supplied paths.
         self.cache
             .join(format!("{id}.{}", if partial { "part" } else { "bin" }))
     }
@@ -182,20 +184,33 @@ impl Store {
     }
 
     pub fn enqueue(&self, source: &Source, paused: bool) -> Result<String> {
-        let id = source.id();
         let account = self.account_for_source(source)?;
-        let db = self.db.lock().unwrap();
+        Self::enqueue_download(&self.db.lock().unwrap(), source, account.as_deref(), paused)
+    }
+
+    pub(crate) fn enqueue_download(
+        db: &Connection,
+        source: &Source,
+        account: Option<&str>,
+        paused: bool,
+    ) -> Result<String> {
         let cache_key = source.cache_id();
         let existing: Option<String> = db.query_row("SELECT id FROM downloads WHERE cache_key=?1 ORDER BY state='complete' DESC,created_at DESC LIMIT 1", [&cache_key], |row| row.get(0)).optional()?;
         if let Some(id) = existing {
             db.execute(
-                "UPDATE downloads SET source=?2,account_key=COALESCE(?3,account_key) WHERE id=?1 AND state!='downloading'",
+                "UPDATE downloads SET source=?2,account_key=COALESCE(?3,account_key) WHERE id=?1 AND state NOT IN ('downloading','deleting')",
                 params![id, serde_json::to_string(source)?,account],
             )?;
             return Ok(id);
         }
+        // A new task must not be affected by stale commands or workers for a deleted task.
+        let id = format!(
+            "{}{}",
+            uuid::Uuid::new_v4().simple(),
+            uuid::Uuid::new_v4().simple()
+        );
         db.execute(
-            "INSERT OR IGNORE INTO downloads(id,path,source,state,cache_key,account_key,queue_order) VALUES (?1,?2,?3,?4,?5,?6,(SELECT COALESCE(MAX(queue_order),0)+1 FROM downloads))",
+            "INSERT INTO downloads(id,path,source,state,cache_key,account_key,queue_order) VALUES (?1,?2,?3,?4,?5,?6,(SELECT COALESCE(MAX(queue_order),0)+1 FROM downloads))",
             params![id, source.display_path(), serde_json::to_string(source)?, if paused { "paused" } else { "queued" }, cache_key,account],
         )?;
         Ok(id)

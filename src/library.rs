@@ -30,6 +30,8 @@ pub struct Session {
 pub struct MediaItem {
     pub guid: String,
     pub title: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tv_title: String,
     pub kind: String,
     pub parent_guid: String,
     pub season_number: u64,
@@ -58,14 +60,16 @@ impl MediaItem {
                 v.as_bool()
                     .or_else(|| v.as_i64().filter(|n| matches!(n, 0 | 1)).map(|n| n == 1))
             });
+        let tv_title = text("tv_title");
         let title = if text("title").is_empty() {
-            text("tv_title")
+            tv_title.clone()
         } else {
             text("title")
         };
         Ok(Self {
             guid: guid.into(),
             title,
+            tv_title,
             kind: text("type"),
             parent_guid: text("parent_guid"),
             season_number: value
@@ -288,15 +292,9 @@ impl Engine {
         if policy.local_history {
             item.watched = None;
         }
-        let id = self.store.enqueue(&source, paused)?;
-        self.store.manage_media(
-            session,
-            &item,
-            media,
-            &id,
-            explicit,
-            crate::scheduler::now(),
-        )?;
+        let id = self
+            .store
+            .enqueue_catalog_media(session, &item, media, &source, explicit, paused)?;
         if explicit && !paused {
             self.store.command(&id, true)?;
         }

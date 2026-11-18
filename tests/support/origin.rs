@@ -463,7 +463,7 @@ fn serve(
             json!({"code":0,"data":{
                 "guid":guid,"media_guid":media,"video_guid":"video-one","ts":900,
                 "play_config":{"skip_opening":5},
-                "item":{"guid":guid,"type":"Episode","title":"Synthetic episode","posters":"fixture-poster","watched_ts":900,"duration":1000,"private":"must-not-store"}
+                "item":{"guid":guid,"type":"Episode","title":"Synthetic episode","tv_title":"Fixture series","season_number":2,"episode_number":5,"posters":"fixture-poster","watched_ts":900,"duration":1000,"private":"must-not-store"}
             }}),
         );
     }

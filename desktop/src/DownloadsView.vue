@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import type { Download, ManagedMedia, Snapshot } from './api'
-import { duration, jobStates, jobTitle, reorderStates, size, waitingStates } from './downloads'
-import DownloadActions from './DownloadActions.vue'
+import { computed, ref, watch } from 'vue'
+import { ApiError, post } from './api'
+import type { Download, ManagedMedia, MediaItem, Snapshot } from './api'
+import { downloadSpeed, duration, reorderStates, size, waitingStates } from './downloads'
+import DownloadRow from './DownloadRow.vue'
 
 const props = defineProps<{ snapshot?: Snapshot; visible: boolean }>()
 const emit = defineEmits<{ refresh: []; notice: [message: string] }>()
@@ -12,9 +13,13 @@ const filters = [
 ] as const
 type Filter = typeof filters[number][0]
 const selected = ref<Filter>('all')
-const table = ref<HTMLTableElement>()
 const openMenu = ref('')
-const downloads = computed(() => props.snapshot?.downloads ?? [])
+const expanded = ref(new Set<string>())
+const seriesBySeason = ref(new Map<string, MediaItem>())
+const retrySeriesAt = new Map<string, number>()
+let resolvingSeries = false
+let supportsSeries = true
+const downloads = computed(() => (props.snapshot?.downloads ?? []).filter(job => job.state !== 'removed'))
 const automation = computed(() => props.snapshot?.automation)
 const active = computed(() => downloads.value.filter(job => job.state === 'downloading'))
 const waiting = computed(() => downloads.value.filter(job => waitingStates.has(job.state)))
@@ -30,59 +35,152 @@ const managed = computed(() => {
   }
   return entries
 })
-const rows = computed(() => {
+const tasks = computed(() => {
   if (selected.value === 'all') return downloads.value
   if (selected.value === 'waiting') return waiting.value
   return downloads.value.filter(job => job.state === selected.value)
 })
+
+type EpisodeTask = { job: Download; entry: ManagedMedia }
+type SeriesGroup = { key: string; title: string; episodes: EpisodeTask[] }
+
+function seasonKey(entry: ManagedMedia) {
+  return `${entry.session_id}/${entry.item.parent_guid}`
+}
+
+async function resolveSeries() {
+  if (!props.visible || resolvingSeries || !supportsSeries) return
+  resolvingSeries = true
+  try {
+    for (const entry of automation.value?.managed ?? []) {
+      if (!props.visible) break
+      const item = entry.item
+      if (item.kind !== 'Episode' || !item.parent_guid) continue
+      const key = seasonKey(entry)
+      if (seriesBySeason.value.has(key) || (retrySeriesAt.get(key) ?? 0) > Date.now()) continue
+      try {
+        const series = await post('/library/series', { session_id: entry.session_id, item_guid: item.parent_guid })
+        seriesBySeason.value.set(key, series)
+        if (expanded.value.delete(key)) {
+          expanded.value.add(`${entry.session_id}/${series.guid}`)
+          openMenu.value = ''
+        }
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 404) {
+          supportsSeries = false
+          break
+        }
+        retrySeriesAt.set(key, Date.now() + 60_000)
+      }
+    }
+  } finally {
+    resolvingSeries = false
+  }
+}
+
+const groups = computed(() => {
+  const groups = new Map<string, SeriesGroup>()
+  const rows: (Download | SeriesGroup)[] = []
+  for (const job of tasks.value) {
+    const entry = managed.value.get(job.id)?.find(({ item }) => item.kind === 'Episode' && item.parent_guid)
+    if (!entry) {
+      rows.push(job)
+      continue
+    }
+    const season = seasonKey(entry)
+    const series = seriesBySeason.value.get(season)
+    const key = series ? `${entry.session_id}/${series.guid}` : season
+    let group = groups.get(key)
+    if (!group) {
+      group = { key, title: series?.title || entry.item.tv_title || '', episodes: [] }
+      groups.set(key, group)
+      rows.push(group)
+    }
+    group.episodes.push({ job, entry })
+  }
+  return rows
+})
+
+function groupTitle(group: SeriesGroup) {
+  if (group.title) return group.title
+  const first = group.episodes[0].entry.item
+  if (first.title && group.episodes.every(({ entry }) => entry.item.title === first.title)) return first.title
+  return `${seasonTitle(first.season_number)} · ${first.title || first.guid}`
+}
+
+function seasonTitle(season: number) {
+  return season ? `第 ${season} 季` : '未分季'
+}
+
+function seasons(group: SeriesGroup) {
+  const bySeason = new Map<number, EpisodeTask[]>()
+  for (const episode of group.episodes) {
+    const number = episode.entry.item.season_number
+    const season = bySeason.get(number) ?? []
+    season.push(episode)
+    bySeason.set(number, season)
+  }
+  return [...bySeason].sort(([a], [b]) => a - b).map(([number, episodes]) => ({
+    number,
+    episodes: episodes.sort((a, b) => a.entry.item.episode_number - b.entry.item.episode_number),
+  }))
+}
+
+function groupSummary(group: SeriesGroup) {
+  const states = new Map<string, string>()
+  for (const { job, entry } of group.episodes) {
+    const current = states.get(entry.item.guid)
+    if (!current || job.state === 'complete' || (current !== 'complete' && job.state === 'downloading')) {
+      states.set(entry.item.guid, job.state)
+    }
+  }
+  const jobs = [...states.values()]
+  const count = (state: string) => jobs.filter(value => value === state).length
+  return [
+    `${jobs.length} 集`,
+    count('complete') && `已缓存 ${count('complete')} 集`,
+    count('downloading') && `下载中 ${count('downloading')} 集`,
+    count('queued') && `排队 ${count('queued')} 集`,
+    count('paused') && `暂停 ${count('paused')} 集`,
+  ].filter(Boolean).join(' · ')
+}
+
+function toggleSeries(key: string) {
+  if (!expanded.value.delete(key)) expanded.value.add(key)
+  openMenu.value = ''
+}
+
 watch(() => props.visible, visible => {
   if (!visible) openMenu.value = ''
+  else void resolveSeries()
 })
-watch(rows, values => {
-  if (openMenu.value && !values.some(job => job.id === openMenu.value)) openMenu.value = ''
+watch(automation, () => void resolveSeries(), { immediate: true })
+watch(tasks, values => {
+  if (openMenu.value && !values.some(job => job.id === openMenu.value.split(':')[1])) openMenu.value = ''
 })
 
 function closeMenu(id: string) {
   if (openMenu.value === id) openMenu.value = ''
 }
 
-function dismissOnPointer(event: PointerEvent) {
-  if (!openMenu.value || !(event.target instanceof Element)) return
-  if (event.target.closest('[data-download-menu]')?.getAttribute('data-download-menu') !== openMenu.value) {
-    openMenu.value = ''
-  }
-}
-
-async function dismissOnEscape(event: KeyboardEvent) {
-  if (event.key !== 'Escape' || !openMenu.value) return
-  event.preventDefault()
-  const summary = table.value?.querySelector<HTMLElement>('details[open] summary')
-  openMenu.value = ''
-  await nextTick()
-  summary?.focus()
-}
-
-onMounted(() => {
-  document.addEventListener('pointerdown', dismissOnPointer)
-  document.addEventListener('keydown', dismissOnEscape)
-})
-onUnmounted(() => {
-  document.removeEventListener('pointerdown', dismissOnPointer)
-  document.removeEventListener('keydown', dismissOnEscape)
-})
 const metrics = computed(() => {
-  const startedBytes = downloads.value.reduce((sum, job) => sum + (job.state === 'removed' ? 0 : job.downloaded), 0)
-  const speed = active.value.reduce((sum, job) => sum + job.bytes_per_second, 0)
+  const speed = downloadSpeed(downloads.value)
   return [
     ['下载中 / 等待中', `${active.value.length} / ${waiting.value.length}`],
     ['下载速度', speed ? `${size(speed)}/s` : '—'],
-    ['任务缓存 / 上限', `${size(startedBytes)} / ${size(automation.value?.cache_limit_bytes)}`],
   ]
+})
+const taskBytes = computed(() => downloads.value.reduce((sum, job) => sum + job.downloaded, 0))
+const cacheLimit = computed(() => automation.value?.cache_limit_bytes ?? 0)
+const quotaPercent = computed(() => {
+  const percent = cacheLimit.value ? 100 * taskBytes.value / cacheLimit.value : 0
+  return percent > 0 && percent < 1 ? '<1%' : `${Math.round(percent)}%`
 })
 const downloadStatus = computed(() => {
   const policy = automation.value?.policy
   if (!policy) return ''
-  if (automation.value?.playing && policy.pause_during_playback) return '播放时暂停下载'
+  const yielding = automation.value?.downloads_yielding ?? (automation.value?.playing && policy.pause_during_playback)
+  if (yielding) return '播放优先，下载暂缓'
   return policy.bytes_per_second ? `限速 ${size(policy.bytes_per_second)}/s` : ''
 })
 
@@ -96,7 +194,7 @@ function notes(job: Download) {
 }
 
 function describe(job: Download) {
-  if (job.waiting_reason === 'playback') return '播放时暂停'
+  if (job.waiting_reason === 'playback') return '播放优先'
   if (job.retry_at) return `重试 ${new Date(job.retry_at * 1000).toLocaleTimeString()}`
   return job.error || ''
 }
@@ -123,6 +221,15 @@ function badge(job: Download) {
     <template v-if="snapshot">
       <div class="panel stats" aria-label="下载与缓存">
         <div v-for="[label, value] in metrics" :key="label"><span>{{ label }}</span><strong>{{ value }}</strong></div>
+        <div class="cache-quota">
+          <div class="quota-caption"><span>任务缓存 / 上限</span><span v-if="cacheLimit" class="number">{{ quotaPercent }}</span></div>
+          <strong>{{ size(taskBytes) }} / {{ size(cacheLimit || undefined) }}</strong>
+          <progress
+            v-if="cacheLimit" :max="cacheLimit" :value="Math.min(taskBytes, cacheLimit)"
+            :aria-valuetext="`${size(taskBytes)} 已用，共 ${size(cacheLimit)}`" aria-label="任务缓存占用"
+            :class="{ 'quota-full': taskBytes >= cacheLimit }"
+          ></progress>
+        </div>
       </div>
       <div class="table-panel">
         <div class="table-tools page-head">
@@ -134,37 +241,48 @@ function badge(job: Download) {
           </div>
           <p v-if="downloadStatus" class="hint">{{ downloadStatus }}</p>
         </div>
-        <table ref="table" class="download-table" aria-label="下载任务">
+        <table class="download-table" aria-label="下载任务">
           <thead><tr>
-            <th scope="col">影片 / 剧集</th><th scope="col">状态</th><th scope="col">进度</th>
+            <th scope="col">影片 / 剧集</th><th scope="col">状态</th><th scope="col">缓存量</th>
             <th scope="col">速度 / 剩余</th><th scope="col" class="align-end">操作</th>
           </tr></thead>
           <tbody id="downloads">
-            <tr v-for="job in rows" :key="job.id" :data-id="job.id">
-              <td class="path">
-                <strong class="title">{{ jobTitle(job, managed.get(job.id) ?? []) }}</strong>
-                <small v-if="notes(job)">{{ notes(job) }}</small>
-              </td>
-              <td><span class="badge" :class="badge(job)">{{ jobStates[job.state] }}</span><p class="hint">{{ describe(job) }}</p></td>
-              <td class="task-progress">
-                <span class="hint number">{{ job.total ? size(job.downloaded) + ' / ' + size(job.total) : job.downloaded ? size(job.downloaded) : '—' }}</span>
-                <progress v-if="job.total" :max="job.total" :value="Math.min(job.downloaded, job.total)" aria-label="下载进度"></progress>
-              </td>
-              <td>{{ transfer(job) }}</td>
-              <td class="task-actions">
-                <DownloadActions
-                  :job="job" :managed="managed.get(job.id) ?? []"
-                  :position="reorderIndex.get(job.id) ?? -1" :queue-length="reorderable.length"
-                  :menu-open="openMenu === job.id"
-                  @toggle-menu="openMenu = openMenu === job.id ? '' : job.id"
-                  @close-menu="closeMenu(job.id)"
-                  @refresh="emit('refresh')" @notice="emit('notice', $event)"
-                />
-              </td>
-            </tr>
+            <template v-for="row in groups" :key="'episodes' in row ? row.key : row.id">
+              <template v-if="'episodes' in row">
+                <tr class="task-series">
+                  <th scope="row">
+                    <button type="button" class="task-label" :aria-expanded="expanded.has(row.key)" @click="toggleSeries(row.key)">
+                      <span aria-hidden="true">{{ expanded.has(row.key) ? '▾' : '▸' }}</span>
+                      {{ groupTitle(row) }}
+                    </button>
+                  </th>
+                  <td colspan="4" class="hint">{{ groupSummary(row) }}</td>
+                </tr>
+                <template v-if="expanded.has(row.key)">
+                  <template v-for="season in seasons(row)" :key="season.number">
+                    <tr v-if="seasons(row).length > 1" class="task-season"><th colspan="5" scope="colgroup">{{ seasonTitle(season.number) }}</th></tr>
+                    <DownloadRow
+                      v-for="{ job, entry } in season.episodes" :key="job.id"
+                      :job="job" :managed="managed.get(job.id) ?? []" :episode-item="entry.item"
+                      :series-title="groupTitle(row)" :notes="notes(job)" :description="describe(job)" :transfer="transfer(job)"
+                      :badge="badge(job)" :position="reorderIndex.get(job.id) ?? -1" :queue-length="reorderable.length"
+                      :open-menu="openMenu" @open="openMenu = $event" @close="closeMenu($event)"
+                      @refresh="emit('refresh')" @notice="emit('notice', $event)"
+                    />
+                  </template>
+                </template>
+              </template>
+              <DownloadRow
+                v-else :job="row" :managed="managed.get(row.id) ?? []"
+                :notes="notes(row)" :description="describe(row)" :transfer="transfer(row)" :badge="badge(row)"
+                :position="reorderIndex.get(row.id) ?? -1" :queue-length="reorderable.length"
+                :open-menu="openMenu" @open="openMenu = $event" @close="closeMenu($event)"
+                @refresh="emit('refresh')" @notice="emit('notice', $event)"
+              />
+            </template>
           </tbody>
         </table>
-        <p v-if="!rows.length" class="empty">{{ selected === 'all' ? '暂无下载任务。' : '此状态下没有任务。' }}</p>
+        <p v-if="!tasks.length" class="empty">{{ selected === 'all' ? '暂无下载任务。' : '此状态下没有任务。' }}</p>
       </div>
     </template>
   </section>

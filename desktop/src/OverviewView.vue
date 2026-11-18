@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { computed, ref, shallowRef, watch } from 'vue'
 import { desktopCall, errorText, get, jobAction, post } from './api'
-import type { Observation, Routes, Snapshot } from './api'
-import { size } from './downloads'
+import type { JobState, MediaItem, Observation, Routes, Snapshot, Stats } from './api'
+import { downloadSpeed, mediaTitle, size, waitingStates } from './downloads'
 
 const props = defineProps<{ snapshot?: Snapshot; visible: boolean; canOpenLogs: boolean }>()
-const emit = defineEmits<{ refresh: []; notice: [message: string] }>()
+const emit = defineEmits<{ refresh: []; notice: [message: string]; showTasks: [] }>()
 const routes = shallowRef<Routes>()
 const observations = shallowRef<Observation[]>([])
 const diagnostics = ref(false)
@@ -22,6 +22,27 @@ const metrics = computed(() => {
   ]
 })
 const playback = computed(() => props.snapshot?.stats.playback ?? [])
+const media = computed(() => props.snapshot?.automation.managed ?? [])
+const rangePrefix = '/v/api/v1/media/range/'
+const readTotals = computed(() => playback.value.reduce((totals, reading) => {
+  totals.local += reading.local_bytes
+  totals.origin += reading.upstream_bytes
+  return totals
+}, { local: 0, origin: 0 }))
+const bytesRead = computed(() => readTotals.value.local + readTotals.value.origin)
+const localShare = computed(() => bytesRead.value ? 100 * readTotals.value.local / bytesRead.value : 0)
+const downloadRate = computed(() => downloadSpeed(props.snapshot?.downloads ?? []))
+const downloadSummary = computed(() => {
+  const counts = new Map<JobState, number>()
+  for (const { state } of props.snapshot?.downloads ?? []) counts.set(state, (counts.get(state) ?? 0) + 1)
+  return [
+    { label: '下载中', color: 'active', count: counts.get('downloading') ?? 0 },
+    { label: '等待中', color: 'waiting', count: [...waitingStates].reduce((sum, state) => sum + (counts.get(state) ?? 0), 0) },
+    { label: '已暂停', color: 'paused', count: counts.get('paused') ?? 0 },
+    { label: '已缓存', color: 'cached', count: counts.get('complete') ?? 0 },
+    { label: '失败', color: 'failed', count: counts.get('failed') ?? 0 },
+  ]
+})
 const routeNames = { unmeasured: '未测速', ready: '可用', failed: '失败', mismatch: '内容待验证' }
 const routeSummary = computed(() => {
   if (probing.value || routes.value?.measuring) return '测速中…'
@@ -60,8 +81,35 @@ watch(() => props.snapshot, value => {
 watch(() => props.visible, read)
 watch(diagnostics, read)
 
-function playbackTitle(downloadId: string | null, path: string) {
-  return props.snapshot?.automation.managed.find(entry => entry.download_id === downloadId)?.item.title || path
+function unambiguousTitle(items: MediaItem[]) {
+  // A shared file can be linked to multiple catalog entries.
+  if (items.length && items.every(item => item.guid === items[0].guid)) {
+    return mediaTitle(items.find(item => item.tv_title && item.episode_number) ?? items.find(item => item.episode_number) ?? items[0])
+  }
+  const names = [...new Set(items.map(mediaTitle).filter(Boolean))]
+  return names.length === 1 ? names[0] : ''
+}
+
+function playbackTitle(reading: Stats['playback'][number]) {
+  const { path, download_id, item } = reading
+  if (item && (item.kind !== 'Episode' || item.episode_number)) {
+    const name = mediaTitle(item)
+    if (name) return name
+  }
+  const attached = download_id ? media.value.filter(entry => entry.download_id === download_id) : []
+  const direct = unambiguousTitle(attached.map(entry => entry.item))
+  if (direct) return direct
+  if (path.startsWith(rangePrefix)) {
+    const guid = path.slice(rangePrefix.length)
+    const matching = media.value.filter(entry => entry.media_guid === guid).map(entry => entry.item)
+    return unambiguousTitle(matching) || (item ? mediaTitle(item) : '') || '未识别影片'
+  }
+  if (item && mediaTitle(item)) return mediaTitle(item)
+  const basename = path.split('/').pop() || path
+  let name = basename
+  try { name = decodeURIComponent(basename) } catch { /* Keep the raw filename if it is malformed. */ }
+  const episode = /^(.+?)[ ._-]+s(\d{1,3})[ ._-]*e(\d{1,4})(?=[ ._-]|$)/i.exec(name)
+  return episode ? `${episode[1].replace(/[._]+/g, ' ')} · S${episode[2].padStart(2, '0')}E${episode[3].padStart(2, '0')}` : name
 }
 
 async function probe() {
@@ -124,15 +172,45 @@ async function capture(item: Observation, sample: boolean) {
       <div class="panel stats" aria-label="本次运行统计">
         <div v-for="[label, value] in metrics" :key="label"><span>{{ label }}</span><strong>{{ value }}</strong></div>
       </div>
+      <section class="panel download-overview" aria-labelledby="download-overview-title">
+        <div class="panel-head">
+          <h2 id="download-overview-title">下载状态</h2>
+          <div class="download-overview-meta">
+            <p class="download-rate"><span class="hint">下载速度</span><strong class="number">{{ size(downloadRate) }}/s</strong></p>
+            <button type="button" @click="emit('showTasks')">查看任务</button>
+          </div>
+        </div>
+        <div class="data-strip" aria-hidden="true">
+          <span v-for="status in downloadSummary" :key="status.color"
+            :class="`chart-${status.color}`" :style="{ flexGrow: status.count }"></span>
+        </div>
+        <dl class="download-statuses">
+          <div v-for="status in downloadSummary" :key="status.color">
+            <dt><span class="chart-key" :class="`chart-${status.color}`"></span>{{ status.label }}</dt>
+            <dd class="number">{{ status.count }}</dd>
+          </div>
+        </dl>
+      </section>
       <div class="overview-panels">
         <section class="panel">
           <div class="panel-head"><h2>播放读取</h2><small>本次运行</small></div>
           <p v-if="!playback.length" class="hint">暂无播放读取。</p>
-          <table v-else aria-label="播放读取">
+          <div v-if="bytesRead" class="playback-mix">
+            <div class="read-legend hint">
+              <span><span class="chart-key chart-cached"></span>本地 {{ size(readTotals.local) }}</span>
+              <strong class="number">{{ Math.round(localShare) }}% 本地</strong>
+              <span><span class="chart-key chart-active"></span>回源 {{ size(readTotals.origin) }}</span>
+            </div>
+            <div class="data-strip" aria-hidden="true">
+              <span class="chart-cached" :style="{ flexGrow: localShare }"></span>
+              <span class="chart-active" :style="{ flexGrow: 100 - localShare }"></span>
+            </div>
+          </div>
+          <table v-if="playback.length" aria-label="播放读取">
             <thead><tr><th scope="col">影片</th><th scope="col">状态</th><th scope="col">本地</th><th scope="col">回源</th></tr></thead>
             <tbody>
               <tr v-for="item in playback" :key="item.id || item.path">
-                <td class="path">{{ playbackTitle(item.download_id, item.path) }}</td>
+                <td class="path" :title="item.path">{{ playbackTitle(item) }}</td>
                 <td>{{ item.active_requests ? '读取中' : '最近读过' }}</td>
                 <td class="number">{{ size(item.local_bytes) }}</td>
                 <td class="number">{{ size(item.upstream_bytes) }}</td>

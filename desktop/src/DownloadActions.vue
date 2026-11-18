@@ -3,6 +3,7 @@ import { computed, nextTick, ref, watch } from 'vue'
 import { errorText, jobAction, post } from './api'
 import type { Download, DownloadCommand, ManagedMedia } from './api'
 import { pauseStates, resumeStates } from './downloads'
+import TaskPopover from './TaskPopover.vue'
 
 const props = defineProps<{
   job: Download
@@ -21,7 +22,6 @@ const canResume = computed(() => resumeStates.has(props.job.state))
 const canCancel = computed(() => !['complete', 'cancelled', 'removed', 'deleting'].includes(props.job.state))
 const canDelete = computed(() => !['removed', 'deleting'].includes(props.job.state))
 const canManage = computed(() => canDelete.value && props.managed.length > 0)
-const keepInline = computed(() => props.managed.length === 1 && props.job.state === 'complete')
 
 watch(() => props.menuOpen, open => {
   if (!open) confirming.value = false
@@ -36,6 +36,7 @@ async function run(operation: () => Promise<unknown>, message = '') {
   emit('notice', '')
   try {
     await operation()
+    emit('closeMenu')
     if (message) emit('notice', message)
     emit('refresh')
   } catch (error) {
@@ -91,17 +92,16 @@ function remove() {
       {{ job.state === 'removed' ? '重新下载' : '继续' }}
     </button>
     <button v-else-if="canPause" type="button" :disabled="busy" @click="command('pause')">暂停</button>
-    <button v-if="keepInline" type="button" :disabled="busy" @click="retain(managed[0], 'keep')">
-      {{ managed[0].keep ? '取消保留' : '保留' }}
-    </button>
-
-    <details v-if="canManage || canCancel || canDelete || position >= 0" :open="menuOpen" :data-download-menu="job.id">
-      <summary @click.prevent="emit('toggleMenu')">更多</summary>
-      <div>
+    <TaskPopover
+      v-if="canManage || canCancel || canDelete || position >= 0" :open="menuOpen" label="更多操作"
+      trigger-class="task-more" @toggle="emit('toggleMenu')" @close="emit('closeMenu')"
+    >
+      <template #trigger><span aria-hidden="true">⋯</span></template>
+      <div class="task-menu">
         <button v-if="canPause && canResume" type="button" :disabled="busy" @click="command('pause')">暂停</button>
         <template v-if="canManage">
           <template v-for="entry in managed" :key="entry.session_id + '/' + entry.item.guid">
-            <button v-if="!keepInline" type="button" :disabled="busy" @click="retain(entry, 'keep')">
+            <button type="button" :disabled="busy" @click="retain(entry, 'keep')">
               {{ entry.keep ? '取消保留' : '保留' }}{{ managed.length > 1 ? ' · ' + (entry.item.title || entry.item.guid) : '' }}
             </button>
             <button type="button" title="只影响本地缓存清理" :disabled="busy" @click="retain(entry, 'completed')">
@@ -122,6 +122,6 @@ function remove() {
           </template>
         </template>
       </div>
-    </details>
+    </TaskPopover>
   </div>
 </template>

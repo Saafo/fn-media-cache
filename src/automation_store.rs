@@ -1,6 +1,6 @@
 //! Durable catalog bindings, playback work and local cache retention state.
 use anyhow::{Context, Result, bail};
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::Serialize;
 
 use crate::{
@@ -40,6 +40,8 @@ impl Store {
                 manual_completed INTEGER, upstream_watched INTEGER, keep INTEGER NOT NULL DEFAULT 0,
                 suppressed INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(session_id,item_guid));
              CREATE INDEX IF NOT EXISTS managed_download ON managed_media(download_id);
+             CREATE TABLE IF NOT EXISTS prefetch_suppressions (
+                session_id TEXT NOT NULL, item_guid TEXT NOT NULL, PRIMARY KEY(session_id,item_guid));
              CREATE TABLE IF NOT EXISTS playback_work (session_id TEXT NOT NULL, item_guid TEXT NOT NULL,
                 seen_at INTEGER NOT NULL, PRIMARY KEY(session_id,item_guid));"
         )?;
@@ -155,38 +157,49 @@ impl Store {
         Ok(())
     }
 
-    pub fn manage_media(
+    pub fn enqueue_catalog_media(
         &self,
         session: &Session,
         item: &MediaItem,
         media: &str,
-        download: &str,
+        source: &Source,
         explicit: bool,
-        at: i64,
-    ) -> Result<()> {
+        paused: bool,
+    ) -> Result<String> {
+        let account = self.account_for_source(source)?;
         let mut db = self.db.lock().unwrap();
         let transaction = db.transaction()?;
-        let state: String =
-            transaction.query_row("SELECT state FROM downloads WHERE id=?1", [download], |r| {
-                r.get(0)
-            })?;
+        if !explicit && is_suppressed(&transaction, &session.id, &item.guid)? {
+            bail!("automatic download suppressed");
+        }
+        let download = Self::enqueue_download(&transaction, source, account.as_deref(), paused)?;
+        let state: String = transaction.query_row(
+            "SELECT state FROM downloads WHERE id=?1",
+            [&download],
+            |r| r.get(0),
+        )?;
         if state == "deleting" {
             bail!("cache cleanup is in progress; retry shortly");
         }
+        let completed = (item.watched == Some(true)).then(now);
         transaction.execute("INSERT INTO managed_media(session_id,item_guid,item_json,media_guid,download_id,completed_at,upstream_watched)
             VALUES (?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(session_id,item_guid) DO UPDATE SET
             item_json=excluded.item_json,media_guid=excluded.media_guid,download_id=excluded.download_id",
-            params![session.id,item.guid,serde_json::to_string(item)?,media,download,if item.watched==Some(true) {Some(at)} else {None}, item.watched])?;
+            params![session.id,item.guid,serde_json::to_string(item)?,media,download,completed,item.watched])?;
         if explicit {
+            transaction.execute(
+                "DELETE FROM prefetch_suppressions WHERE session_id=?1 AND item_guid=?2",
+                params![session.id, item.guid],
+            )?;
             transaction.execute("UPDATE managed_media SET suppressed=0,completed_at=CASE WHEN suppressed=1 THEN ?3 ELSE completed_at END WHERE session_id=?1 AND item_guid=?2",
-                params![session.id,item.guid,if item.watched==Some(true) {Some(at)} else {None}])?;
+                params![session.id,item.guid,completed])?;
             transaction.execute(
                 "UPDATE downloads SET state='queued',error=NULL WHERE id=?1 AND state IN ('removed','cancelled')",
-                [download],
+                [&download],
             )?;
         }
         transaction.commit()?;
-        Ok(())
+        Ok(download)
     }
 
     pub fn managed(&self) -> Result<Vec<ManagedMedia>> {
@@ -213,17 +226,7 @@ impl Store {
     }
 
     pub fn suppressed(&self, session: &str, item: &str) -> Result<bool> {
-        Ok(self
-            .db
-            .lock()
-            .unwrap()
-            .query_row(
-                "SELECT suppressed FROM managed_media WHERE session_id=?1 AND item_guid=?2",
-                params![session, item],
-                |r| r.get(0),
-            )
-            .optional()?
-            .unwrap_or(false))
+        is_suppressed(&self.db.lock().unwrap(), session, item)
     }
 
     pub fn update_completion(
@@ -380,13 +383,60 @@ impl Store {
     pub fn finish_cleanup(&self, download: &str, cache_key: &str) -> Result<()> {
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction()?;
+        if !purge_download(&tx, download, "deleting")? {
+            return Ok(());
+        }
         tx.execute("DELETE FROM segments WHERE id=?1 OR id IN (SELECT old_key FROM cache_aliases WHERE current_key=?1)", [cache_key])?;
         tx.execute(
             "DELETE FROM cache_aliases WHERE current_key=?1",
             [cache_key],
         )?;
-        tx.execute("UPDATE downloads SET state='removed',downloaded=0,error=NULL WHERE id=?1 AND state='deleting'",[download])?;
         tx.commit()?;
         Ok(())
     }
+
+    pub fn prune_removed(&self, item: &crate::store::Download) -> Result<bool> {
+        if item.id.len() != 64 || !item.id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Ok(false);
+        }
+        for partial in [false, true] {
+            if !matches!(self.file(&item.id, partial).try_exists(), Ok(false)) {
+                return Ok(false);
+            }
+        }
+        if !self.segments(&item.source.cache_id())?.is_empty() {
+            return Ok(false);
+        }
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        let purged = purge_download(&tx, &item.id, "removed")?;
+        tx.commit()?;
+        Ok(purged)
+    }
+}
+
+fn is_suppressed(db: &Connection, session: &str, item: &str) -> Result<bool> {
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM prefetch_suppressions WHERE session_id=?1 AND item_guid=?2
+          UNION ALL SELECT 1 FROM managed_media WHERE session_id=?1 AND item_guid=?2 AND suppressed=1)",
+        params![session, item],
+        |row| row.get(0),
+    )?)
+}
+
+fn purge_download(tx: &Transaction<'_>, id: &str, state: &str) -> Result<bool> {
+    let removed = tx.execute(
+        "DELETE FROM downloads WHERE id=?1 AND state=?2",
+        params![id, state],
+    )?;
+    if removed == 0 {
+        return Ok(false);
+    }
+    tx.execute(
+        "INSERT OR IGNORE INTO prefetch_suppressions(session_id,item_guid)
+         SELECT session_id,item_guid FROM managed_media WHERE download_id=?1 AND (suppressed=1 OR ?2='deleting')",
+        params![id, state],
+    )?;
+    tx.execute("DELETE FROM managed_media WHERE download_id=?1", [id])?;
+    Ok(true)
 }
