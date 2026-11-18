@@ -4,6 +4,7 @@ mod doctor;
 mod engine;
 mod fntv;
 mod library;
+mod local_history;
 mod logging;
 mod partial_cache;
 mod privacy;

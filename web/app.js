@@ -36,6 +36,7 @@ async function refresh() {
     const [stats, observations, downloads, routes, automation, sessions] = await Promise.all([api('/stats'), api('/observations'), api('/downloads'), api('/routes'), api('/automation'), api('/sessions')]);
     activePolicy = automation.policy;
     $('privacy-banner').hidden=!activePolicy.incognito;
+    $('local-history-banner').hidden=!activePolicy.local_history;
     if (!settingsLoaded) { fillSettings(activePolicy, automation.cache_limit_bytes); settingsLoaded = true; }
     const currentSession = $('session').value;
     const sessionSignature=sessions.map(item=>`${item.id}:${item.status}`).join(',');
@@ -136,7 +137,7 @@ async function refresh() {
 $('connect').onclick = () => { token = $('token').value.trim(); $('token').value = ''; refresh(); };
 $('token').addEventListener('keydown', e => { if (e.key === 'Enter') $('connect').click(); });
 function fillSettings(policy, cacheLimit) {
-  $('incognito').checked=policy.incognito;
+  $('history-mode').value=policy.incognito ? 'incognito' : policy.local_history ? 'local' : 'sync';
   $('auto-prefetch').checked=policy.auto_prefetch;
   $('pause-playing').checked=policy.pause_during_playback;
   $('cleanup-enabled').checked=policy.cleanup_enabled;
@@ -204,7 +205,7 @@ $('save-settings').onclick=async()=>{
   $('save-settings').disabled=true;
   try {
     const policy={...activePolicy,
-      incognito:$('incognito').checked,
+      incognito:$('history-mode').value==='incognito',local_history:$('history-mode').value==='local',
       auto_prefetch:$('auto-prefetch').checked,pause_during_playback:$('pause-playing').checked,cleanup_enabled:$('cleanup-enabled').checked,
       prefetch_count:number('prefetch-count'),bytes_per_second:Math.round(number('rate-limit')*1048576),
       playback_cooldown_seconds:number('playback-cooldown'),cache_limit_bytes:Math.round(number('cache-limit')*1073741824),

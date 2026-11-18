@@ -257,7 +257,7 @@ impl Engine {
         if !explicit && self.store.suppressed(&session.id, guid)? {
             bail!("automatic download suppressed");
         }
-        let item = self.catalog_item(session, guid).await?;
+        let mut item = self.catalog_item(session, guid).await?;
         if !item.playable() {
             bail!("select an individual episode or movie");
         }
@@ -284,6 +284,9 @@ impl Engine {
         let policy = self.policy.read().unwrap();
         if !explicit && policy.incognito {
             bail!("automatic downloads are paused in incognito mode");
+        }
+        if policy.local_history {
+            item.watched = None;
         }
         let id = self.store.enqueue(&source, paused)?;
         self.store.manage_media(

@@ -5,7 +5,7 @@ use std::{
 
 use axum::{
     Json, Router,
-    body::Body,
+    body::{Body, to_bytes},
     extract::{DefaultBodyLimit, Path, State},
     http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header},
     middleware::{self, Next},
@@ -20,6 +20,7 @@ use tokio_util::io::ReaderStream;
 
 use crate::{
     engine::Engine,
+    local_history,
     protocol::{Range, Source, clean_headers, parse_range, strong_etag, text_header},
     store::Download,
 };
@@ -333,14 +334,28 @@ async fn save_policy(
             "configuration value is out of range",
         )
     })?;
-    engine.store.save_policy(&policy).map_err(catalog_error)?;
-    let incognito = policy.incognito;
-    *engine.policy.write().unwrap() = policy;
-    if incognito {
-        engine.store.clear_playback_work().map_err(catalog_error)?;
-        engine.progress_events.lock().unwrap().clear();
-        engine.observations.lock().unwrap().clear();
-        engine.transfers.clear_playback();
+    {
+        let mut active = engine.policy.write().unwrap();
+        let clear = active.local_history != policy.local_history || policy.incognito;
+        engine
+            .store
+            .save_policy(&policy, clear)
+            .map_err(catalog_error)?;
+        if clear {
+            engine.progress_events.lock().unwrap().clear();
+            engine.history_metadata.clear();
+        }
+        if policy.incognito {
+            engine.observations.lock().unwrap().clear();
+            engine.transfers.clear_playback();
+        } else if policy.local_history {
+            engine
+                .observations
+                .lock()
+                .unwrap()
+                .retain(|item| crate::privacy::endpoint(&item.path) != Some("play/list"));
+        }
+        *active = policy;
     }
     engine.scheduler_wake.notify_one();
     Ok(Json(json!({"ok":true})))
@@ -557,7 +572,10 @@ async fn proxy(State(engine): State<Arc<Engine>>, request: Request<Body>) -> Res
         engine.cache_lease(file_source.cache_id(), playback)
     });
     let response = proxy_inner(engine.clone(), request).await;
-    if target_is_api(&source) && response.status().is_success() {
+    if target_is_api(&source)
+        && response.status().is_success()
+        && !response.headers().contains_key("x-fn-media-cache-privacy")
+    {
         let _ = engine.store.save_session(&source);
         engine.scheduler_wake.notify_one();
     }
@@ -614,7 +632,8 @@ async fn proxy_inner(engine: Arc<Engine>, request: Request<Body>) -> Response {
     let started = Instant::now();
     engine.counters.requests.fetch_add(1, Ordering::Relaxed);
     let (parts, body) = request.into_parts();
-    let private = engine.policy.read().unwrap().incognito;
+    let policy = engine.policy.read().unwrap().clone();
+    let private = policy.incognito;
     if private && crate::privacy::viewing_report(&parts.method, parts.uri.path()) {
         let mut response = Json(json!({"code":0,"msg":"","data":true})).into_response();
         response
@@ -632,6 +651,15 @@ async fn proxy_inner(engine: Arc<Engine>, request: Request<Body>) -> Response {
         .map(|v| v.as_str())
         .unwrap_or("/");
     let source = Source::new(&engine.config.upstream, target, &parts.headers);
+    if policy.local_history
+        && (local_history::list_request(&parts.method, parts.uri.path())
+            || crate::privacy::viewing_report(&parts.method, parts.uri.path()))
+    {
+        return local_history::handle(&engine, &source, &parts.method, parts.uri.path(), body)
+            .await;
+    }
+    let local_info =
+        policy.local_history && local_history::info_request(&parts.method, parts.uri.path());
     let id = source.id();
     if matches!(parts.method, Method::GET | Method::HEAD)
         && let Some(response) =
@@ -715,10 +743,17 @@ async fn proxy_inner(engine: Arc<Engine>, request: Request<Body>) -> Response {
             }
         }
     });
+    let mut outgoing_headers = clean_headers(&parts.headers);
+    if local_info {
+        outgoing_headers.insert(
+            header::ACCEPT_ENCODING,
+            HeaderValue::from_static("identity"),
+        );
+    }
     let result = engine
         .client
         .request(parts.method.clone(), url)
-        .headers(clean_headers(&parts.headers))
+        .headers(outgoing_headers)
         .body(reqwest::Body::wrap_stream(stream))
         .send()
         .await;
@@ -782,7 +817,41 @@ async fn proxy_inner(engine: Arc<Engine>, request: Request<Body>) -> Response {
     let mut response = Response::new(Body::from_stream(stream));
     *response.status_mut() = status;
     *response.headers_mut() = headers;
+    if local_info && status.is_success() {
+        return local_play_info(&engine, &source, response).await;
+    }
     response
+}
+
+async fn local_play_info(engine: &Engine, source: &Source, response: Response) -> Response {
+    let (mut parts, body) = response.into_parts();
+    let error = || {
+        (
+            StatusCode::BAD_GATEWAY,
+            "cannot read local playback information",
+        )
+            .into_response()
+    };
+    let Ok(bytes) = to_bytes(body, local_history::INFO_LIMIT).await else {
+        return error();
+    };
+    let Ok(mut value) = serde_json::from_slice(&bytes) else {
+        return error();
+    };
+    if local_history::overlay_play_info(engine, source, &mut value).is_err() {
+        return error();
+    }
+    for header in [
+        header::CONTENT_LENGTH,
+        header::CONTENT_ENCODING,
+        header::ETAG,
+    ] {
+        parts.headers.remove(header);
+    }
+    parts
+        .headers
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Response::from_parts(parts, Json(value).into_response().into_body())
 }
 
 async fn cached_segment(

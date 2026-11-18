@@ -3,7 +3,7 @@ use crate::{engine::Engine, library::Session, protocol::Source, store::Store};
 use anyhow::Result;
 use rusqlite::{OptionalExtension, params};
 
-fn credential_key(source: &Source) -> String {
+pub(crate) fn credential_key(source: &Source) -> String {
     let mut scope = source.clone();
     scope.target = "/v/api/v1/media/range/session-scope".into();
     scope.cache_id()
@@ -64,6 +64,7 @@ impl Store {
                     params![id,serde_json::to_string(&source)?,account,crate::scheduler::now()])?;
             }
         }
+        crate::local_history::bind_account(&tx, &session.id, account)?;
         let downloads: Vec<(String, String, Option<String>)> = tx
             .prepare("SELECT id,source,account_key FROM downloads")?
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?

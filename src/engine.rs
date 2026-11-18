@@ -61,6 +61,7 @@ pub struct Engine {
     pub client: reqwest::Client,
     pub token: String,
     pub observations: Mutex<VecDeque<Observation>>,
+    pub history_metadata: crate::local_history::Metadata,
     pub progress_events: Mutex<VecDeque<ProgressEvent>>,
     pub counters: Counters,
     pub transfers: Arc<crate::transfers::Transfers>,
@@ -105,6 +106,7 @@ impl Engine {
             client,
             token,
             observations: Mutex::new(VecDeque::new()),
+            history_metadata: Default::default(),
             progress_events: Mutex::new(VecDeque::new()),
             counters: Counters::default(),
             transfers: Arc::new(crate::transfers::Transfers::default()),
@@ -146,7 +148,7 @@ impl Engine {
 
     pub fn record_progress(&self, source: &Source, body: Option<Vec<u8>>, status: u16) {
         let policy = self.policy.read().unwrap();
-        if policy.incognito {
+        if !policy.syncs_history() {
             return;
         }
         use sha2::{Digest, Sha256};

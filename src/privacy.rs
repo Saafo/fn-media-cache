@@ -1,24 +1,21 @@
 //! Known viewing-history writes. Playback setup and media transfer must still work.
 use axum::http::Method;
 
+pub fn endpoint(path: &str) -> Option<&str> {
+    let (version, endpoint) = path
+        .trim_end_matches('/')
+        .strip_prefix("/v/api/")?
+        .split_once('/')?;
+    let version = version.strip_prefix('v')?;
+    (!version.is_empty() && version.bytes().all(|c| c.is_ascii_digit())).then_some(endpoint)
+}
+
 pub fn viewing_report(method: &Method, path: &str) -> bool {
-    let Some(rest) = path.trim_end_matches('/').strip_prefix("/v/api/") else {
+    let Some(endpoint) = endpoint(path) else {
         return false;
     };
-    let Some((version, endpoint)) = rest.split_once('/') else {
-        return false;
-    };
-    if !version.starts_with('v')
-        || version.len() < 2
-        || !version[1..].bytes().all(|c| c.is_ascii_digit())
-    {
-        return false;
-    }
     let write = matches!(*method, Method::POST | Method::PUT | Method::PATCH);
-    if endpoint == "play/record" {
-        return write;
-    }
-    if endpoint == "item/watched" {
+    if matches!(endpoint, "play/record" | "item/watched") {
         return write || *method == Method::DELETE;
     }
     if let Some(item) = endpoint

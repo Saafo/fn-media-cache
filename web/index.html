@@ -41,6 +41,7 @@
   <p id="message" role="status"></p>
   <div id="content" hidden>
     <p class="panel" id="privacy-banner" hidden>无痕模式已开启：观看上报不发往上游，不记录本地播放进度，不新增自动预取。登录和视频请求仍会访问上游。</p>
+    <p class="panel" id="local-history-banner" hidden>本地记录已开启。最近播放和续播位置保存在这台服务上。</p>
     <div class="panel metrics" id="metrics"></div>
     <h2>选择影片或剧集</h2>
     <div class="toolbar"><select id="session" aria-label="登录会话"></select><input id="search-query" placeholder="搜索片名或剧名" maxlength="200"><button id="search">搜索</button><button id="library-root">媒体库</button><button id="catalog-back">返回</button></div>
@@ -50,7 +51,7 @@
     <details class="panel"><summary>下载与清理设置</summary>
       <p class="muted">设置保存后立即生效。自动预取默认关闭；启用后根据播放器上报的当前剧集预取后续集数。清理只删除本机缓存。</p>
       <div class="settings">
-        <label><span><input type="checkbox" id="incognito"> 无痕观看（影响此代理的所有播放器）</span></label>
+        <label>播放记录<select id="history-mode"><option value="sync">同步记录</option><option value="local">本地记录</option><option value="incognito">无痕模式</option></select></label>
         <label><span><input type="checkbox" id="auto-prefetch"> 自动预取后续剧集</span></label>
         <label>预取集数<input type="number" id="prefetch-count" min="1" max="20" step="1"></label>
         <label>下载限速（MiB/s，0 为不限速）<input type="number" id="rate-limit" min="0" max="1024" step="0.25"></label>

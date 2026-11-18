@@ -445,6 +445,28 @@ fn serve(
     if r.path.starts_with("/v/api/v1/media/range/") {
         return media_reply(&mut stream, r, &state, &s, stop);
     }
+    if r.path == "/v/api/v1/play/list" {
+        return json_reply(
+            &mut stream,
+            200,
+            json!({"code":0,"data":[{"guid":"cloud-only","ts":900}]}),
+        );
+    }
+    // Playback setup normally arrives already authenticated by the app.
+    if s.mode == Mode::Recovery && r.path == "/v/api/v1/play/info" {
+        let request = r.json();
+        let guid = request["item_guid"].as_str().unwrap();
+        let media = request["media_guid"].as_str().unwrap_or(guid);
+        return json_reply(
+            &mut stream,
+            200,
+            json!({"code":0,"data":{
+                "guid":guid,"media_guid":media,"video_guid":"video-one","ts":900,
+                "play_config":{"skip_opening":5},
+                "item":{"guid":guid,"type":"Episode","title":"Synthetic episode","posters":"fixture-poster","watched_ts":900,"duration":1000,"private":"must-not-store"}
+            }}),
+        );
+    }
     if !r.signed(catalog) {
         return json_reply(
             &mut stream,

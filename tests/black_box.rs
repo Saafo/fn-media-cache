@@ -4,6 +4,8 @@ mod automation;
 mod doctor;
 #[path = "cases/general.rs"]
 mod general;
+#[path = "cases/local_history.rs"]
+mod local_history;
 #[path = "cases/native.rs"]
 mod native;
 #[path = "cases/playback.rs"]

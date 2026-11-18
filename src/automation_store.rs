@@ -62,6 +62,7 @@ impl Store {
         }
         db.execute_batch("CREATE TABLE IF NOT EXISTS cache_aliases(old_key TEXT PRIMARY KEY,current_key TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS cache_alias_current ON cache_aliases(current_key);")?;
+        crate::local_history::initialize(&db)?;
         Ok(())
     }
 
@@ -138,13 +139,19 @@ impl Store {
             .unwrap_or_else(|| Ok(Policy::default()))
     }
 
-    pub fn save_policy(&self, policy: &Policy) -> Result<()> {
+    pub fn save_policy(&self, policy: &Policy, clear_playback_work: bool) -> Result<()> {
         policy.validate()?;
-        self.db.lock().unwrap().execute(
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        tx.execute(
             "INSERT INTO settings(key,value) VALUES ('automation_policy',?1)
             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             [serde_json::to_string(policy)?],
         )?;
+        if clear_playback_work {
+            tx.execute("DELETE FROM playback_work", [])?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -314,10 +321,15 @@ impl Store {
         Ok(())
     }
 
-    pub fn cleanup_candidates(&self, at: i64, retention: u64) -> Result<Vec<String>> {
+    pub fn cleanup_candidates(
+        &self,
+        at: i64,
+        retention: u64,
+        manual_only: bool,
+    ) -> Result<Vec<String>> {
         Ok(self.db.lock().unwrap().prepare("SELECT download_id FROM managed_media GROUP BY download_id
-            HAVING MIN(CASE WHEN keep=0 AND completed_at IS NOT NULL AND completed_at<=?1 THEN 1 ELSE 0 END)=1")?
-            .query_map([at.saturating_sub(retention as i64)],|r|r.get(0))?.collect::<rusqlite::Result<_>>()?)
+            HAVING MIN(CASE WHEN keep=0 AND completed_at IS NOT NULL AND completed_at<=?1 AND (NOT ?2 OR manual_completed=1) THEN 1 ELSE 0 END)=1")?
+            .query_map(params![at.saturating_sub(retention as i64),manual_only],|r|r.get(0))?.collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn pending_cleanup(&self) -> Result<Vec<String>> {
@@ -330,7 +342,13 @@ impl Store {
             .collect::<rusqlite::Result<_>>()?)
     }
 
-    pub fn begin_cleanup(&self, download: &str, at: i64, retention: u64) -> Result<bool> {
+    pub fn begin_cleanup(
+        &self,
+        download: &str,
+        at: i64,
+        retention: u64,
+        manual_only: bool,
+    ) -> Result<bool> {
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction()?;
         let pending: bool = tx
@@ -344,7 +362,7 @@ impl Store {
         if pending {
             return Ok(true);
         }
-        let blocked: i64 = tx.query_row("SELECT COUNT(*) FROM managed_media WHERE download_id=?1 AND (keep=1 OR completed_at IS NULL OR completed_at>?2)", params![download,at.saturating_sub(retention as i64)],|r|r.get(0))?;
+        let blocked: i64 = tx.query_row("SELECT COUNT(*) FROM managed_media WHERE download_id=?1 AND (keep=1 OR completed_at IS NULL OR completed_at>?2 OR (?3 AND manual_completed IS NOT 1))", params![download,at.saturating_sub(retention as i64),manual_only],|r|r.get(0))?;
         if blocked > 0 {
             return Ok(false);
         }

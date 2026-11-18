@@ -24,6 +24,7 @@ pub fn now() -> i64 {
 pub struct Policy {
     pub auto_prefetch: bool,
     pub incognito: bool,
+    pub local_history: bool,
     pub prefetch_count: usize,
     pub bytes_per_second: u64,
     pub pause_during_playback: bool,
@@ -47,6 +48,7 @@ impl Default for Policy {
         Self {
             auto_prefetch: false,
             incognito: false,
+            local_history: false,
             prefetch_count: 2,
             bytes_per_second: 2 * 1024 * 1024,
             pause_during_playback: true,
@@ -68,7 +70,14 @@ impl Default for Policy {
     }
 }
 impl Policy {
+    pub fn syncs_history(&self) -> bool {
+        !self.incognito && !self.local_history
+    }
+
     pub fn validate(&self) -> Result<()> {
+        if self.incognito && self.local_history {
+            bail!("local history and incognito are mutually exclusive");
+        }
         if !(1..=20).contains(&self.prefetch_count)
             || self.bytes_per_second > 1024 * 1024 * 1024
             || self.retention_seconds > 365 * 86400
@@ -223,6 +232,7 @@ impl Engine {
         session: &Session,
         current: &MediaItem,
         count: usize,
+        local_history: bool,
     ) -> Result<Vec<MediaItem>> {
         if current.kind != "Episode" || current.season_number == 0 || current.episode_number == 0 {
             return Ok(vec![]);
@@ -262,7 +272,9 @@ impl Engine {
                     continue;
                 }
                 let item = items.into_iter().next().unwrap();
-                if item.watched != Some(false) || self.store.suppressed(&session.id, &item.guid)? {
+                if (!local_history && item.watched != Some(false))
+                    || self.store.suppressed(&session.id, &item.guid)?
+                {
                     continue;
                 }
                 selected.push(item);
@@ -286,14 +298,28 @@ impl Engine {
                 Ok(item) => item,
                 Err(_) => continue,
             };
-            if self.policy.read().unwrap().incognito {
-                return Ok(());
+            {
+                let active = self.policy.read().unwrap();
+                if active.incognito || active.local_history != policy.local_history {
+                    return Ok(());
+                }
+                if !active.local_history {
+                    self.store.update_completion(
+                        &session.id,
+                        &current.guid,
+                        current.watched,
+                        now(),
+                    )?;
+                }
             }
-            self.store
-                .update_completion(&session.id, &current.guid, current.watched, now())?;
             if policy.auto_prefetch {
                 for item in self
-                    .next_episodes(&session, &current, policy.prefetch_count)
+                    .next_episodes(
+                        &session,
+                        &current,
+                        policy.prefetch_count,
+                        policy.local_history,
+                    )
                     .await?
                 {
                     if self
@@ -318,10 +344,11 @@ impl Engine {
         // Finish a committed deletion after a crash even if the policy changed meanwhile.
         let mut candidates = self.store.pending_cleanup()?;
         if policy.cleanup_enabled {
-            candidates.extend(
-                self.store
-                    .cleanup_candidates(at, policy.retention_seconds)?,
-            );
+            candidates.extend(self.store.cleanup_candidates(
+                at,
+                policy.retention_seconds,
+                policy.local_history,
+            )?);
         }
         candidates.sort();
         candidates.dedup();
@@ -339,9 +366,12 @@ impl Engine {
             let key = item.source.cache_id();
             let uses = self.cache_uses.lock().unwrap();
             if uses.get(&key).copied().unwrap_or(0) > 0
-                || !self
-                    .store
-                    .begin_cleanup(&id, at, policy.retention_seconds)?
+                || !self.store.begin_cleanup(
+                    &id,
+                    at,
+                    policy.retention_seconds,
+                    policy.local_history,
+                )?
             {
                 continue;
             }
@@ -418,14 +448,14 @@ impl Engine {
                 crate::event!("playback scheduling deferred; metadata unavailable");
             }
             // Reconcile a bounded rotating set, including items whose completed record left play/list.
-            if !self.policy.read().unwrap().incognito
+            if self.policy.read().unwrap().syncs_history()
                 && let Ok(managed) = self.store.managed()
             {
                 for offset in 0..managed.len().min(4) {
                     let item = &managed[(cursor + offset) % managed.len()];
                     if let Ok(session) = self.session(Some(&item.session_id))
                         && let Ok(current) = self.catalog_item(&session, &item.item.guid).await
-                        && !self.policy.read().unwrap().incognito
+                        && self.policy.read().unwrap().syncs_history()
                     {
                         let _ = self.store.update_completion(
                             &session.id,

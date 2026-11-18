@@ -192,6 +192,9 @@ impl Engine {
         source: Option<&Source>,
         filename: &str,
     ) -> Option<serde_json::Value> {
+        if !self.policy.read().unwrap().syncs_history() {
+            return None;
+        }
         let source = source?;
         // Only the observed, read-only playback-list request may be replayed here.
         if source.display_path() != "/v/api/v1/play/list" {
