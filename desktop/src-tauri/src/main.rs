@@ -99,7 +99,7 @@ fn main() {
                     .map(|i| i as &dyn tauri::menu::IsMenuItem<_>)
                     .collect::<Vec<_>>(),
             )?;
-            let mut tray = TrayIconBuilder::new()
+            let tray = TrayIconBuilder::new()
                 .tooltip("FN Media Cache")
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id.as_ref() {
@@ -110,9 +110,16 @@ fn main() {
                     "quit" => app.exit(0),
                     _ => {}
                 });
-            if let Some(icon) = app.default_window_icon() {
-                tray = tray.icon(icon.clone());
-            }
+            #[cfg(target_os = "macos")]
+            let tray = tray
+                .icon(tauri::include_image!("icons/menu-bar-template@2x.png"))
+                .icon_as_template(true);
+            #[cfg(not(target_os = "macos"))]
+            let tray = if let Some(icon) = app.default_window_icon() {
+                tray.icon(icon.clone())
+            } else {
+                tray
+            };
             tray.build(app)?;
             tauri::async_runtime::spawn(async move {
                 controller.start_on_launch().await;

@@ -1,0 +1,246 @@
+{
+  "fill-specializations" : [
+    {
+      "value" : {
+        "linear-gradient" : [
+          "extended-srgb:0.89804,0.94902,0.99608,1.00000",
+          "extended-srgb:0.58824,0.75686,0.94510,1.00000"
+        ],
+        "orientation" : {
+          "start" : {
+            "x" : 0.24,
+            "y" : 1
+          },
+          "stop" : {
+            "x" : 0.78,
+            "y" : 0
+          }
+        }
+      }
+    },
+    {
+      "appearance" : "dark",
+      "value" : {
+        "linear-gradient" : [
+          "extended-srgb:0.12549,0.22745,0.34510,1.00000",
+          "extended-srgb:0.06275,0.14118,0.24314,1.00000"
+        ],
+        "orientation" : {
+          "start" : {
+            "x" : 0.24,
+            "y" : 1
+          },
+          "stop" : {
+            "x" : 0.78,
+            "y" : 0
+          }
+        }
+      }
+    }
+  ],
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "linear-gradient" : [
+                  "extended-srgb:0.33333,0.61176,0.89804,1.00000",
+                  "extended-srgb:0.17255,0.46667,0.79608,1.00000"
+                ]
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "extended-srgb:0.56863,0.78431,1.00000,1.00000"
+              }
+            },
+            {
+              "appearance" : "tinted",
+              "value" : {
+                "solid" : "extended-gray:1.00000,1.00000"
+              }
+            }
+          ],
+          "image-name" : "05 Play.svg",
+          "name" : "05 Play"
+        }
+      ],
+      "name" : "04 Play",
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.08
+      },
+      "specular" : false,
+      "translucency" : {
+        "enabled" : false,
+        "value" : 0
+      }
+    },
+    {
+      "layers" : [
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "linear-gradient" : [
+                  "extended-srgb:0.48627,0.92941,0.88627,1.00000",
+                  "extended-srgb:0.19216,0.77647,0.85490,1.00000"
+                ]
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "linear-gradient" : [
+                  "extended-srgb:0.50588,0.94902,0.89020,1.00000",
+                  "extended-srgb:0.15686,0.74902,0.81176,1.00000"
+                ]
+              }
+            },
+            {
+              "appearance" : "tinted",
+              "value" : {
+                "solid" : "extended-gray:0.89000,1.00000"
+              }
+            }
+          ],
+          "image-name" : "04 Aqua Arc.svg",
+          "name" : "04 Aqua Arc"
+        },
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "linear-gradient" : [
+                  "extended-srgb:0.56078,0.74902,0.94118,1.00000",
+                  "extended-srgb:0.27843,0.54510,0.84314,1.00000"
+                ]
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "linear-gradient" : [
+                  "extended-srgb:0.53333,0.72941,0.94118,1.00000",
+                  "extended-srgb:0.28235,0.49804,0.77255,1.00000"
+                ]
+              }
+            },
+            {
+              "appearance" : "tinted",
+              "value" : {
+                "solid" : "extended-gray:0.76000,1.00000"
+              }
+            }
+          ],
+          "image-name" : "03 Blue Arc.svg",
+          "name" : "03 Blue Arc"
+        }
+      ],
+      "lighting" : "combined",
+      "name" : "03 Ring",
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.16
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.065
+      }
+    },
+    {
+      "layers" : [
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "linear-gradient" : [
+                  "extended-srgb:0.75294,0.85882,0.97255,1.00000",
+                  "extended-srgb:0.86275,0.93333,1.00000,1.00000"
+                ]
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "linear-gradient" : [
+                  "extended-srgb:0.34118,0.49020,0.66275,1.00000",
+                  "extended-srgb:0.47451,0.64706,0.82353,1.00000"
+                ]
+              }
+            },
+            {
+              "appearance" : "tinted",
+              "value" : {
+                "solid" : "extended-gray:0.60000,1.00000"
+              }
+            }
+          ],
+          "image-name" : "02 Upper Platform.svg",
+          "name" : "02 Upper Platform"
+        }
+      ],
+      "name" : "02 Upper Platform",
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.17
+      },
+      "specular" : false,
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.11
+      }
+    },
+    {
+      "layers" : [
+        {
+          "fill-specializations" : [
+            {
+              "value" : {
+                "linear-gradient" : [
+                  "extended-srgb:0.56863,0.74510,0.92549,1.00000",
+                  "extended-srgb:0.75686,0.87451,0.98039,1.00000"
+                ]
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "linear-gradient" : [
+                  "extended-srgb:0.18824,0.30980,0.46275,1.00000",
+                  "extended-srgb:0.25490,0.40392,0.56078,1.00000"
+                ]
+              }
+            },
+            {
+              "appearance" : "tinted",
+              "value" : {
+                "solid" : "extended-gray:0.38000,1.00000"
+              }
+            }
+          ],
+          "image-name" : "01 Lower Platform.svg",
+          "name" : "01 Lower Platform"
+        }
+      ],
+      "name" : "01 Lower Platform",
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.23
+      },
+      "specular" : false,
+      "translucency" : {
+        "enabled" : false,
+        "value" : 0
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "squares" : [
+      "macOS"
+    ]
+  }
+}

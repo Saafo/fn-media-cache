@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/fn-media-cache-app-icon.png" width="128" alt="FN Media Cache 图标" />
+</p>
+
 # FN Media Cache
 
 飞牛影视本地缓存服务。通过本地代理连接飞牛影视，提前缓存影片或后续剧集，继续使用原有播放器播放。
