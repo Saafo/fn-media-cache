@@ -1,90 +1,347 @@
 <!doctype html>
 <html lang="zh-CN">
 <head>
-  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>FN Media Cache · 飞牛影视本地缓存服务</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FN Media Cache</title>
   <style>
-    :root{color-scheme:light dark;font-family:system-ui,-apple-system,sans-serif;background:#12161c;color:#e7edf5}
-    body{max-width:1100px;margin:48px auto;padding:0 24px}h1{font-size:30px;margin-bottom:8px}h2{font-size:19px;margin-top:32px}
-    .muted{color:#a4b0c0;font-size:14px;line-height:1.7}.panel{background:#1c232c;border:1px solid #344051;border-radius:12px;padding:20px;margin:20px 0}
-    input,textarea{background:#10151c;color:#e7edf5;border:1px solid #4b5c72;border-radius:6px;padding:10px;width:min(420px,75%)}
-    button{background:#b9d8ff;color:#102036;border:0;border-radius:6px;padding:9px 14px;cursor:pointer;margin:4px}
-    button:disabled{opacity:.45;cursor:default}.metrics{display:flex;flex-wrap:wrap;gap:24px}.metric b{display:block;font-size:24px;margin-top:4px}
-    table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;border-bottom:1px solid #344051;padding:12px 6px;overflow-wrap:anywhere}th{color:#a4b0c0;font-weight:500}
-    .path{max-width:420px}#message{min-height:24px;color:#ffd499}progress{width:140px}a{color:#b9d8ff}code{font-size:13px}
-    .settings{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:18px;margin:20px 0}.settings label{display:flex;flex-direction:column;gap:7px;font-size:14px}.settings input{width:150px}input[type=checkbox]{width:auto;accent-color:#b9d8ff}select{background:#10151c;color:#e7edf5;border:1px solid #4b5c72;padding:10px;border-radius:6px;max-width:100%}.toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}summary{cursor:pointer}#catalog-status{min-height:24px}
-    @media(max-width:700px){body{margin-top:24px;padding:0 14px}table{font-size:12px}.path{max-width:160px}.panel{padding:12px}}
+    :root {
+      color-scheme: light dark;
+      --canvas: #f4f8f8;
+      --sidebar: #ebf2f3;
+      --surface: #fff;
+      --text: #192e35;
+      --muted: #52696f;
+      --line: #d8e5e7;
+      --track: #e4eeef;
+      --accent: #096c59;
+      --on-accent: #fff;
+      --selected: #deeee8;
+      --warning: #805c22;
+      --warning-bg: #f8efdc;
+      --danger: #a1323e;
+      font: 14px/1.5 system-ui, -apple-system, sans-serif;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --canvas: #121e26; --sidebar: #162532; --surface: #1b2b35; --text: #ecf5f5;
+        --muted: #a6bdc6; --line: #324751; --track: #304653; --accent: #8ce3c9;
+        --on-accent: #133a2e; --selected: #254942; --warning: #f6d99d;
+        --warning-bg: #493c25; --danger: #ffc0c6;
+      }
+    }
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    body { margin: 0; background: var(--canvas); color: var(--text); }
+    h1, h2, p { margin: 0; }
+    h1 { font-size: 30px; line-height: 1.2; letter-spacing: -.045em; }
+    h2 { font-size: 16px; }
+    button, input, select, textarea { font: inherit; color: inherit; }
+    input, select, textarea, button, summary { outline-offset: 3px; }
+    input, select, textarea {
+      max-width: 100%; padding: 7px 9px; background: var(--surface); border: 1px solid var(--line);
+      border-radius: 7px;
+    }
+    input[type="checkbox"] { accent-color: var(--accent); }
+    textarea { resize: vertical; }
+    button {
+      padding: 6px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface);
+      cursor: pointer; font-size: 13px; white-space: nowrap;
+    }
+    button:not(:disabled):hover { border-color: var(--accent); }
+    button:disabled { opacity: .48; cursor: default; }
+    .primary { color: var(--on-accent); background: var(--accent); border-color: var(--accent); font-weight: 650; }
+    .danger { color: var(--danger); }
+    .shell { display: grid; grid-template-columns: 182px minmax(0, 1fr); align-items: start; min-height: 100vh; }
+    .sidebar {
+      display: flex; flex-direction: column; gap: 25px; min-height: 100vh; position: sticky; top: 0;
+      background: var(--sidebar); border-right: 1px solid var(--line); padding: 25px 12px 15px;
+    }
+    .brand { margin: 0 9px; font-weight: 750; font-size: 15px; letter-spacing: -.03em; white-space: nowrap; }
+    nav { display: grid; gap: 4px; }
+    nav button { border: 0; background: transparent; text-align: left; padding: 9px 12px; }
+    nav button[aria-current="page"] { background: var(--selected); color: var(--accent); font-weight: 700; }
+    .service-state { margin-top: auto; padding: 12px 8px 0; border-top: 1px solid var(--line); }
+    .service-state strong { font-size: 12px; }
+    .service-state strong[data-running="true"]::before {
+      content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 7px; background: var(--accent);
+      border-radius: 50%; vertical-align: 2px;
+    }
+    .service-state code { display: block; margin-top: 4px; font-size: 10px; color: var(--muted); overflow-wrap: anywhere; }
+    main { width: 100%; max-width: 1420px; margin-inline: auto; padding: 29px clamp(17px, 3vw, 42px) 40px; }
+    .page-head, .panel-head, .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 9px; }
+    .page-head { margin-bottom: 19px; min-height: 36px; }
+    .toolbar { flex-wrap: wrap; justify-content: flex-start; }
+    .panel-head { margin-bottom: 12px; }
+    .panel, .table-panel { border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+    .panel { padding: 15px; margin-bottom: 14px; }
+    .table-panel { overflow-x: auto; margin-bottom: 14px; }
+    .table-tools { padding: 9px 12px; }
+    .filters { gap: 4px; }
+    .filters button { border-color: transparent; background: transparent; padding-inline: 7px; }
+    .filters button[aria-pressed="true"] { background: var(--selected); color: var(--accent); font-weight: 650; }
+    .stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); padding: 0; }
+    .stats > div { padding: 13px 15px; min-width: 0; }
+    .stats > div + div { border-left: 1px solid var(--line); }
+    .stats span, .hint, small { color: var(--muted); font-size: 12px; }
+    .stats strong { display: block; margin-top: 2px; font-size: clamp(16px, 2vw, 24px); font-variant-numeric: tabular-nums; }
+    .notice:not(:empty) { margin-bottom: 13px; border: 1px solid var(--line); padding: 8px 11px; border-radius: 8px; background: var(--surface); }
+    .hint:empty { display: none; }
+    .empty { padding: 15px; color: var(--muted); }
+    .empty:empty { display: none; }
+    th, td { text-align: left; padding: 9px 11px; vertical-align: top; }
+    th { background: var(--canvas); color: var(--muted); font-size: 12px; font-weight: 650; white-space: nowrap; }
+    table { width: 100%; border-collapse: collapse; }
+    td { border-top: 1px solid var(--line); font-size: 13px; }
+    td button, td summary { font-size: 12px; }
+    .title { display: block; font-weight: 640; overflow-wrap: anywhere; }
+    .path { overflow-wrap: anywhere; }
+    .number { font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .task-progress { min-width: 105px; }
+    progress {
+      width: 100%; height: 5px; display: block; margin-top: 5px; appearance: none; border: 0;
+      border-radius: 9px; overflow: hidden; background: var(--track); color: var(--accent);
+    }
+    progress::-webkit-progress-bar { background: var(--track); }
+    progress::-webkit-progress-value { background: var(--accent); }
+    progress::-moz-progress-bar { background: var(--accent); }
+    .badge { display: inline-block; font-size: 11px; white-space: nowrap; padding: 2px 6px; border-radius: 5px; background: var(--track); }
+    .badge.active, .badge.complete { color: var(--accent); background: var(--selected); }
+    .badge.warning { color: var(--warning); background: var(--warning-bg); }
+    .task-actions { min-width: 126px; }
+    .task-actions > .toolbar { min-height: 31px; justify-content: flex-end; }
+    details { min-width: 0; }
+    details summary { cursor: pointer; }
+    .task-actions details[open] { width: 100%; }
+    .task-actions details > div { display: grid; justify-items: end; gap: 5px; padding: 7px 0 3px; }
+    .task-actions details summary { color: var(--muted); text-align: right; }
+    .task-actions p { text-align: right; }
+    .overview-panels { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 12px; align-items: start; }
+    .overview-panels td { padding: 8px 5px; }
+    .overview-panels th { padding: 6px 5px; }
+    .overview-panels table { margin-top: 8px; }
+    .diagnostics summary { font-weight: 650; }
+    .diagnostics[open] summary { margin-bottom: 12px; }
+    .diagnostics .toolbar { margin: 0 0 10px; }
+    .catalog-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(168px, .34fr); gap: 12px; align-items: start; }
+    .catalog-search input { min-width: 115px; flex: 1; }
+    .catalog-search select { max-width: 200px; }
+    .catalog-search { margin-bottom: 12px; }
+    .catalog-header { padding: 10px 12px; background: var(--surface); }
+    .catalog-header h2 { font-size: 14px; overflow-wrap: anywhere; }
+    .catalog-footer { border-top: 1px solid var(--line); padding: 10px 12px; align-items: center; }
+    .catalog-footer > .primary { margin-left: auto; }
+    .catalog-select { width: 42px; }
+    .queue-preview { margin: 10px 0 0; padding: 0; list-style: none; }
+    .queue-preview li + li { border-top: 1px solid var(--line); }
+    .queue-preview li { padding: 8px 0; }
+    .queue-preview li:last-child { padding-bottom: 0; }
+    .queue-preview small { display: block; }
+    .settings { display: grid; grid-template-columns: repeat(auto-fit, minmax(164px, 1fr)); gap: 13px; margin: 12px 0; }
+    .settings label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+    .settings label span { display: flex; align-items: center; gap: 5px; }
+    .settings textarea { grid-column: span 1; }
+    .settings .wide { grid-column: 1 / -1; }
+    .form-actions { margin-top: 10px; }
+    .settings-note { margin: 7px 0 0; }
+    .login { max-width: 430px; }
+    .login .toolbar { margin: 9px 0; }
+    .login input { flex: 1; min-width: 140px; }
+    @media (max-width: 1030px) {
+      .sidebar { min-height: 100vh; }
+      .overview-panels { grid-template-columns: 1fr; gap: 0; }
+    }
+    @media (max-width: 790px) {
+      .shell { grid-template-columns: 138px minmax(0, 1fr); }
+      .sidebar { padding-inline: 7px; }
+      .brand { font-size: 13px; }
+      .catalog-layout { grid-template-columns: 1fr; }
+      .catalog-layout aside { max-width: 400px; }
+      .download-table td, .download-table th { padding-inline: 6px; }
+    }
+    @media (max-width: 560px) {
+      .shell { display: block; }
+      .sidebar { min-height: 0; gap: 8px; padding: 10px 12px; position: static; border-right: 0; border-bottom: 1px solid var(--line); }
+      .brand { margin-inline: 3px; }
+      nav { display: flex; flex-wrap: wrap; gap: 4px; }
+      nav button { padding: 5px 8px; }
+      .service-state { display: flex; gap: 8px; align-items: center; padding: 0 3px; border: 0; }
+      .service-state code { margin: 0; }
+      main { padding-top: 17px; }
+      h1 { font-size: 24px; }
+      .stats > div { padding: 8px; }
+    }
   </style>
   <script src="/app.js" defer></script>
   <script src="/desktop.js" defer></script>
 </head>
 <body>
-  <h1>FN Media Cache</h1>
-  <p class="muted">飞牛影视本地缓存服务 · 测试版，关闭此页面不会停止任务。</p>
-  <section class="panel" id="desktop-panel" hidden>
-    <div class="toolbar"><strong id="desktop-status" role="status">正在检查后台…</strong><button id="service-logs">打开日志目录</button></div>
-    <details id="server-settings"><summary>服务器设置</summary>
-      <div class="settings">
-        <label>主服务器地址<input id="server-origin" placeholder="http://服务器:端口"></label>
-        <label>备用地址（每行一个）<textarea id="server-alternates" rows="3"></textarea></label>
-        <label>代理端口<input type="number" id="server-port" min="1" max="65535"></label>
-        <label><span><input type="checkbox" id="server-lan"> 允许局域网播放器连接</span></label>
-        <label>单个日志上限（MiB）<input type="number" id="server-log-size" min="1" max="1024"></label>
-        <label>保留历史日志数<input type="number" id="server-log-keep" min="1" max="20"></label>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand">FN Media Cache</div>
+    <nav aria-label="主导航">
+      <button type="button" data-page="tasks" aria-current="page">下载任务</button>
+      <button type="button" data-page="overview">运行总览</button>
+      <button type="button" data-page="library">媒体库</button>
+      <button type="button" data-page="settings">设置</button>
+    </nav>
+    <div class="service-state">
+      <strong id="service-state">待连接</strong>
+      <code id="proxy-address" hidden></code>
+    </div>
+  </aside>
+  <main>
+    <form class="panel login" id="login">
+      <label for="token"><strong>管理令牌</strong></label>
+      <div class="toolbar"><input id="token" type="password" autocomplete="off" required><button class="primary">连接</button></div>
+      <p class="hint">令牌在数据目录的 <code>admin-token</code> 文件中。</p>
+    </form>
+    <p id="message" class="notice" role="status"></p>
+    <section id="tasks" data-view>
+      <header class="page-head"><h1>下载任务</h1></header>
+      <p class="panel hint" data-disconnected>连接后台后可查看下载任务。</p>
+      <div data-connected hidden>
+        <div class="panel stats" id="download-metrics" aria-label="下载与缓存"></div>
+        <div class="table-panel">
+          <div class="table-tools page-head" style="margin:0">
+            <div class="toolbar filters" aria-label="按状态筛选">
+              <button type="button" data-filter="all" aria-pressed="true">全部</button>
+              <button type="button" data-filter="active" aria-pressed="false">下载中</button>
+              <button type="button" data-filter="waiting" aria-pressed="false">等待中</button>
+              <button type="button" data-filter="paused" aria-pressed="false">已暂停</button>
+              <button type="button" data-filter="complete" aria-pressed="false">已缓存</button>
+            </div>
+            <p class="hint" id="download-status"></p>
+          </div>
+          <table class="download-table" aria-label="下载任务">
+            <thead><tr><th scope="col">影片 / 剧集</th><th scope="col">状态</th><th scope="col">进度</th><th scope="col">速度 / 剩余</th><th scope="col" style="text-align:right">操作</th></tr></thead>
+            <tbody id="downloads"></tbody>
+          </table>
+          <p class="empty" id="downloads-empty" hidden></p>
+        </div>
       </div>
-      <p class="muted">切换主服务器会使用独立缓存目录，原缓存保留。保存会重新加载服务配置。</p>
-      <button id="server-save">保存</button>
-    </details>
-    <p id="server-message" class="muted" role="status"></p>
-  </section>
-  <div class="panel" id="login"><label for="token">管理令牌</label><br><br><input id="token" type="password" autocomplete="off" placeholder="粘贴 data/admin-token 中的内容"><button id="connect">连接</button><p class="muted">令牌只留在当前页面内存中。服务启动时会显示令牌文件位置。</p></div>
-  <p id="message" role="status"></p>
-  <div id="content" hidden>
-    <p class="panel" id="privacy-banner" hidden>无痕模式已开启：观看上报不发往上游，不记录本地播放进度，不新增自动预取。登录和视频请求仍会访问上游。</p>
-    <p class="panel" id="local-history-banner" hidden>本地记录已开启。最近播放和续播位置保存在这台服务上。</p>
-    <div class="panel metrics" id="metrics"></div>
-    <h2>选择影片或剧集</h2>
-    <div class="toolbar"><select id="session" aria-label="登录会话"></select><input id="search-query" placeholder="搜索片名或剧名" maxlength="200"><button id="search">搜索</button><button id="library-root">媒体库</button><button id="catalog-back">返回</button></div>
-    <p class="muted" id="catalog-status"></p>
-    <table><thead><tr><th>选择</th><th>名称</th><th>类型 / 集数</th><th>操作</th></tr></thead><tbody id="catalog"></tbody></table>
-    <div class="toolbar"><button id="catalog-prev">上一页</button><span id="catalog-page"></span><button id="catalog-next">下一页</button><button id="download-selection">下载选中项（0）</button></div>
-    <details class="panel"><summary>下载与清理设置</summary>
-      <p class="muted">设置保存后立即生效。自动预取默认关闭；启用后根据播放器上报的当前剧集预取后续集数。清理只删除本机缓存。</p>
-      <div class="settings">
-        <label>播放记录<select id="history-mode"><option value="sync">同步记录</option><option value="local">本地记录</option><option value="incognito">无痕模式</option></select></label>
-        <label><span><input type="checkbox" id="auto-prefetch"> 自动预取后续剧集</span></label>
-        <label>预取集数<input type="number" id="prefetch-count" min="1" max="20" step="1"></label>
-        <label>下载限速（MiB/s，0 为不限速）<input type="number" id="rate-limit" min="0" max="1024" step="0.25"></label>
-        <label><span><input type="checkbox" id="pause-playing"> 播放器读取视频时暂停后台下载</span></label>
-        <label>播放结束后等待（秒）<input type="number" id="playback-cooldown" min="0" max="3600" step="1"></label>
-        <label>缓存空间上限（GiB）<input type="number" id="cache-limit" min="0.01" step="any"></label>
-        <label>磁盘预留空间（MiB）<input type="number" id="disk-reserve" min="0" step="64"></label>
-        <label><span><input type="checkbox" id="cleanup-enabled"> 看完后自动清理缓存</span></label>
-        <label>看完后保留（小时，0 可立即清理）<input type="number" id="retention-hours" min="0" max="8760" step="0.25"></label>
-        <label>调度检查间隔（秒）<input type="number" id="scheduler-interval" min="1" max="3600" step="1"></label>
-        <label>线路测速结果有效期（分钟）<input type="number" id="route-ttl" min="0.5" max="1440" step="0.5"></label>
-        <label>每条线路测速超时（秒）<input type="number" id="route-timeout" min="1" max="120" step="1"></label>
-        <label>每条线路测速样本（KiB）<input type="number" id="route-sample" min="1" max="1024" step="1"></label>
-        <label>自动重试次数（0 为关闭）<input type="number" id="retry-count" min="0" max="100"></label>
-        <label>首次重试等待（秒）<input type="number" id="retry-base" min="1" max="86400"></label>
-        <label>重试最长等待（秒）<input type="number" id="retry-max" min="1" max="86400"></label>
-        <label>会话检查间隔（秒）<input type="number" id="session-check" min="1" max="3600"></label>
-        <label>恢复检测阈值（秒）<input type="number" id="resume-threshold" min="1" max="3600"></label>
-      </div><p class="muted">无痕不会删除已有观看历史。关闭无痕前先退出当前播放页，避免客户端之后补报缓存在内存中的进度。</p><button id="save-settings">保存设置</button><span class="muted" id="settings-state"></span>
-    </details>
-    <h2>播放读取</h2>
-    <p class="muted">显示本次后台运行期间的媒体读取量。传输结束后，播放器可能仍在播放已缓冲的数据。</p>
-    <table><thead><tr><th>影片</th><th>连接状态</th><th>本地读取</th><th>回源读取</th><th>本地占比</th></tr></thead><tbody id="playback"></tbody></table>
-    <h2>下载线路 <button id="probe-routes">重新测速</button></h2>
-    <p class="muted" id="route-summary">等待视频请求。登录和观看记录仍走主地址。</p>
-    <table><thead><tr><th>地址</th><th>状态</th><th>样本速度</th><th>样本耗时</th></tr></thead><tbody id="routes"></tbody></table>
-    <h2>最近经过代理的请求</h2>
-    <p class="muted">先让播放器经过代理播放一次，再选择样本缓存或完整下载。样本缓存最多读取 3 MiB，不会下载整部。列表隐藏查询参数和认证头。</p>
-    <table><thead><tr><th>路径</th><th>响应</th><th>大小</th><th>操作</th></tr></thead><tbody id="observations"></tbody></table>
-    <h2>下载与缓存</h2>
-    <p class="muted" id="download-status">仅一个后台下载并发。缓存命中前仍会向上游校验权限和文件版本。</p>
-    <p class="muted">“本地标记看完”只影响缓存清理，不改上游观看记录；“保留”会阻止自动清理。取消任务保留已下载数据；删除缓存释放空间，使用中的文件会等读取结束后删除。调整顺序不打断当前下载。</p>
-    <table><thead><tr><th>路径</th><th>状态</th><th>进度</th><th>速度 / 剩余时间</th><th>操作</th></tr></thead><tbody id="downloads"></tbody></table>
-  </div>
+    </section>
+    <section id="overview" data-view hidden>
+      <header class="page-head"><h1>运行总览</h1><button type="button" id="service-logs" hidden>打开日志目录</button></header>
+      <p class="panel hint" data-disconnected>连接后台后可查看运行状态。</p>
+      <div data-connected hidden>
+        <div class="panel stats" id="metrics" aria-label="本次运行统计"></div>
+        <div class="overview-panels">
+          <section class="panel">
+            <div class="panel-head"><h2>播放读取</h2><small>本次运行</small></div>
+            <p class="hint" id="playback-empty">暂无播放读取。</p>
+            <table id="playback-table" aria-label="播放读取" hidden>
+              <thead><tr><th scope="col">影片</th><th scope="col">状态</th><th scope="col">本地</th><th scope="col">回源</th></tr></thead>
+              <tbody id="playback"></tbody>
+            </table>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h2>下载线路</h2><button type="button" id="probe-routes">重新测速</button></div>
+            <p class="hint" id="route-summary"></p>
+            <table aria-label="下载线路">
+              <thead><tr><th scope="col">地址</th><th scope="col">状态</th><th scope="col">样本速度</th><th scope="col">耗时</th></tr></thead>
+              <tbody id="routes"></tbody>
+            </table>
+          </section>
+        </div>
+        <details class="panel diagnostics" id="diagnostics">
+          <summary>诊断</summary>
+          <div class="toolbar">
+            <span id="diagnostic-summary" class="hint"></span>
+          </div>
+          <h2>最近代理请求</h2>
+          <p class="hint" id="observations-empty">暂无代理请求。</p>
+          <table id="observations-table" aria-label="代理请求" hidden>
+            <thead><tr><th scope="col">路径</th><th scope="col">响应</th><th scope="col">大小</th><th scope="col">操作</th></tr></thead>
+            <tbody id="observations"></tbody>
+          </table>
+        </details>
+      </div>
+    </section>
+    <section id="library" data-view hidden>
+      <header class="page-head"><h1>媒体库</h1></header>
+      <p class="panel hint" data-disconnected>连接后台后可浏览媒体库。</p>
+      <div data-connected hidden>
+        <form class="toolbar catalog-search" id="catalog-search">
+          <select id="session" aria-label="播放会话"></select>
+          <input id="search-query" aria-label="片名" placeholder="搜索片名" maxlength="200">
+          <button id="search">搜索</button>
+        </form>
+        <div class="catalog-layout">
+          <div class="table-panel">
+            <header class="panel-head catalog-header" style="margin:0">
+              <h2 id="catalog-title">媒体库</h2>
+              <button type="button" id="catalog-back" hidden>返回上一级</button>
+            </header>
+            <p class="empty" id="catalog-status"></p>
+            <table id="catalog-table" aria-label="媒体库" hidden>
+              <thead><tr><th scope="col" class="catalog-select">选择</th><th scope="col">名称</th><th scope="col">集数 / 类型</th><th scope="col">状态</th></tr></thead>
+              <tbody id="catalog"></tbody>
+            </table>
+            <div class="toolbar catalog-footer" id="catalog-footer" hidden>
+              <button type="button" id="catalog-prev">上一页</button><small id="catalog-page"></small><button type="button" id="catalog-next">下一页</button>
+              <button type="button" id="download-selection" class="primary" disabled>加入队列</button>
+            </div>
+          </div>
+          <aside class="panel">
+            <h2>下载队列</h2>
+            <ul class="queue-preview" id="queue-preview"></ul>
+            <p class="hint" id="queue-empty">队列为空。</p>
+          </aside>
+        </div>
+      </div>
+    </section>
+    <section id="settings" data-view hidden>
+      <header class="page-head"><h1>设置</h1></header>
+      <form class="panel" id="desktop-panel" hidden>
+        <h2>服务器</h2>
+        <div class="settings">
+          <label class="wide">主地址<input id="server-origin" type="url" placeholder="http://服务器:端口" required></label>
+          <label class="wide">备用地址（每行一个）<textarea id="server-alternates" rows="2"></textarea></label>
+          <label>代理端口<input type="number" id="server-port" min="1" max="65535" required></label>
+          <label>单份日志上限（MiB）<input type="number" id="server-log-size" min="1" max="1024" required></label>
+          <label>保留日志份数<input type="number" id="server-log-keep" min="1" max="20" required></label>
+          <label><span><input type="checkbox" id="server-lan">允许局域网播放器连接</span></label>
+        </div>
+        <p class="hint">保存后重启后台。更换主地址会切换缓存目录。</p>
+        <div class="toolbar form-actions"><button id="server-save" class="primary">保存服务器</button><p class="hint" id="server-message" role="status"></p></div>
+      </form>
+      <form class="panel" id="policy-form" data-connected hidden>
+        <h2>播放与下载</h2>
+        <div class="settings">
+          <label>播放记录<select id="history-mode"><option value="sync">同步记录</option><option value="local">本地记录</option><option value="incognito">无痕模式</option></select></label>
+          <label>限速（MiB/s，0 为不限速）<input type="number" id="rate-limit" min="0" max="1024" step="any" required></label>
+          <label>播放后等待（秒）<input type="number" id="playback-cooldown" min="0" max="3600" required></label>
+          <label><span><input type="checkbox" id="pause-playing">播放时暂停下载</span></label>
+          <label><span><input type="checkbox" id="auto-prefetch">自动预取后续剧集</span></label>
+          <label>预取集数<input type="number" id="prefetch-count" min="1" max="20" required></label>
+        </div>
+        <p id="history-note" class="hint settings-note"></p>
+        <h2 style="margin-top:15px">缓存</h2>
+        <div class="settings">
+          <label>上限（GiB）<input type="number" id="cache-limit" min="0.01" step="any" required></label>
+          <label>磁盘预留（MiB）<input type="number" id="disk-reserve" min="0" step="any" required></label>
+          <label>看完后保留（小时）<input type="number" id="retention-hours" min="0" max="8760" step="any" required></label>
+          <label><span><input type="checkbox" id="cleanup-enabled">看完后自动清理</span></label>
+        </div>
+        <details>
+          <summary>高级</summary>
+          <div class="settings">
+            <label>调度间隔（秒）<input type="number" id="scheduler-interval" min="1" max="3600" required></label>
+            <label>测速结果有效期（分钟）<input type="number" id="route-ttl" min="0.5" max="1440" step="any" required></label>
+            <label>线路测速超时（秒）<input type="number" id="route-timeout" min="1" max="120" required></label>
+            <label>线路测速样本（KiB）<input type="number" id="route-sample" min="1" max="1024" step="any" required></label>
+            <label>自动重试次数<input type="number" id="retry-count" min="0" max="100" required></label>
+            <label>首次重试间隔（秒）<input type="number" id="retry-base" min="1" max="86400" required></label>
+            <label>最长重试间隔（秒）<input type="number" id="retry-max" min="1" max="86400" required></label>
+            <label>会话检查间隔（秒）<input type="number" id="session-check" min="1" max="3600" required></label>
+            <label>恢复检测阈值（秒）<input type="number" id="resume-threshold" min="1" max="3600" required></label>
+          </div>
+        </details>
+        <div class="toolbar form-actions"><button id="save-settings" class="primary">保存偏好</button><p id="settings-state" class="hint" role="status"></p></div>
+      </form>
+    </section>
+  </main>
+</div>
 </body>
 </html>
