@@ -75,15 +75,14 @@ fn main() {
                     current
                 }
             });
-            let packaged = app.path().resolve(
-                "daemon/fn-media-cache",
-                tauri::path::BaseDirectory::Resource,
-            )?;
-            let daemon = if packaged.exists() {
-                packaged
-            } else {
+            let daemon = if cfg!(dev) {
                 PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                     .join("../../bin/fn-media-cache-macos-arm64")
+            } else {
+                app.path().resolve(
+                    "daemon/fn-media-cache",
+                    tauri::path::BaseDirectory::Resource,
+                )?
             };
             let controller = Arc::new(Controller::new(root, daemon, development)?);
             app.manage(Arc::clone(&controller));

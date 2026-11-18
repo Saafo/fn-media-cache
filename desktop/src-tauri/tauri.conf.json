@@ -3,11 +3,19 @@
   "productName": "FN Media Cache",
   "version": "0.1.0",
   "identifier": "local.fn-media-cache.desktop",
-  "build": { "frontendDist": "../../web" },
+  "build": {
+    "beforeDevCommand": "npm run dev:web",
+    "devUrl": "http://127.0.0.1:5173",
+    "beforeBuildCommand": "npm run build:web",
+    "frontendDist": "../dist"
+  },
   "app": {
     "withGlobalTauri": true,
     "windows": [{ "label": "main", "title": "FN Media Cache", "width": 1120, "height": 820, "minWidth": 720, "minHeight": 540 }],
-    "security": { "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost; img-src 'self' data:; frame-src 'none'; base-uri 'none'" }
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost; img-src 'self' data:; frame-src 'none'; base-uri 'none'",
+      "devCsp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost ws://127.0.0.1:5173; img-src 'self' data:; frame-src 'none'; base-uri 'none'"
+    }
   },
   "bundle": {
     "active": true,

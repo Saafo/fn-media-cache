@@ -4,6 +4,7 @@
 /fn-media-cache.toml
 /fn-media.toml
 /desktop/node_modules/
+/desktop/dist/
 /desktop/src-tauri/target/
 /desktop/src-tauri/gen/
 .DS_Store

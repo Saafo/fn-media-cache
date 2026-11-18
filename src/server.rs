@@ -52,8 +52,9 @@ pub fn admin_router(engine: Arc<Engine>) -> Router {
         .route_layer(middleware::from_fn_with_state(engine.clone(), authorize));
     Router::new()
         .route("/", get(index))
-        .route("/app.js", get(script))
-        .route("/desktop.js", get(desktop_script))
+        .route("/assets/app.js", get(app_script))
+        .route("/assets/app.css", get(app_stylesheet))
+        .route("/licenses.txt", get(app_licenses))
         .route(
             "/health",
             get(|| async { Json(json!({"ok": true, "version": env!("CARGO_PKG_VERSION")})) }),
@@ -91,8 +92,8 @@ async fn authorize(
 }
 
 async fn index() -> Response {
-    let mut response = Html(include_str!("../web/index.html")).into_response();
-    response.headers_mut().insert("content-security-policy", HeaderValue::from_static("default-src 'self'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'"));
+    let mut response = Html(include_str!("../desktop/dist/index.html")).into_response();
+    response.headers_mut().insert("content-security-policy", HeaderValue::from_static("default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'"));
     response.headers_mut().insert(
         "x-content-type-options",
         HeaderValue::from_static("nosniff"),
@@ -100,18 +101,32 @@ async fn index() -> Response {
     response
 }
 
-async fn script() -> Response {
+async fn app_script() -> Response {
     (
-        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-        include_str!("../web/app.js"),
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_str!("../desktop/dist/assets/app.js"),
     )
         .into_response()
 }
 
-async fn desktop_script() -> Response {
+async fn app_stylesheet() -> Response {
     (
-        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-        include_str!("../web/desktop.js"),
+        [
+            (header::CONTENT_TYPE, "text/css; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_str!("../desktop/dist/assets/app.css"),
+    )
+        .into_response()
+}
+
+async fn app_licenses() -> Response {
+    (
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        include_str!("../desktop/dist/licenses.txt"),
     )
         .into_response()
 }

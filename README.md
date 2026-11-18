@@ -22,9 +22,11 @@
 
 ## 运行后台
 
-Rust 后台也支持命令行独立运行，管理页面内嵌在程序中。
+Rust 后台可独立运行，内嵌同一套管理页面。从源码构建时，先用 Node.js 22.12 或更新版本 构建页面。
 
 ```sh
+npm --prefix desktop ci
+npm --prefix desktop run build:web
 cargo build --release --locked
 ./target/release/fn-media-cache init --upstream https://media.example.com
 ./target/release/fn-media-cache serve
@@ -84,9 +86,16 @@ npm run tauri build -- --bundles app
 
 从旧版升级后，App 首次启动服务时会停用旧的 macOS 登录启动项，继续使用原来的配置和缓存。
 
+## 界面开发
+
+准备好上面的后台可执行文件后，在 `desktop/` 运行 `npm run dev`。Vue 页面由 Vite 热更新。可用 `FN_MEDIA_CACHE_HOME` 指定单独的配置目录，代理和管理端口也要与日常服务错开。
+
 ## 开发验证
 
 ```sh
+npm --prefix desktop ci
+npm --prefix desktop run typecheck
+npm --prefix desktop run build:web
 cargo fmt --check
 cargo test --locked
 cargo clippy --all-targets --locked -- -D warnings
