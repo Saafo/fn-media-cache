@@ -30,6 +30,18 @@ cargo build --release --locked
 
 需要局域网播放器连接时，把配置中的 `proxy_listen` 改为 `0.0.0.0:28005`。管理接口仍仅允许本机访问。
 
+## 检查运行状态
+
+在配置所在目录运行：
+
+```sh
+./target/release/fn-media-cache doctor
+```
+
+也可以通过 `--config` 指定配置文件，通过 `--timeout-seconds` 调整单项检查的超时（默认 5 秒）。检查使用配置中的实际端口；通配监听地址会转为本机回环地址。
+
+`doctor` 检查管理接口的健康响应，以及代理能否收到上游响应，不读取管理令牌、不创建数据目录，也不启动或停止后台。全部通过时退出码为 0，否则为非零。代理返回 2xx、3xx 或 4xx 表示可达，5xx 或网络失败表示异常；可达不代表登录或播放已经验证通过。
+
 ## 配置与使用
 
 同一服务器的备用地址可以放进 `upstream_alternates`。地址必须属于同一台服务器，登录凭据会发送到这些地址。
@@ -64,14 +76,15 @@ npm run tauri build -- --bundles app
 cargo fmt --check
 cargo test --locked
 cargo clippy --all-targets --locked -- -D warnings
-python3 tests/integration.py --binary target/release/fn-media-cache
-python3 tests/native_integration.py --binary target/release/fn-media-cache
-python3 tests/routes_integration.py --binary target/release/fn-media-cache
-python3 tests/automation_integration.py --binary target/release/fn-media-cache
-python3 tests/privacy_integration.py --binary target/release/fn-media-cache
-python3 tests/recovery_integration.py --binary target/release/fn-media-cache
-python3 tests/task_playback_integration.py --binary target/release/fn-media-cache
-python3 tests/shutdown.py --binary target/release/fn-media-cache
+```
+
+集成测试在 `tests/black_box.rs`，分为 9 组，覆盖代理、原生缓存、多线路、预取清理、无痕、会话恢复、部分缓存与任务管理、运行状态检查，以及 Unix 的 SIGTERM 正常退出。共用测试工具位于 `tests/support/`；测试会启动实际后台进程，通过 HTTP 验证行为，不需要 Python。
+
+默认由 Cargo 构建待测程序。也可以针对已经构建好的 release 程序运行同一套集成测试：
+
+```sh
+cargo build --release --locked
+FN_MEDIA_TEST_BINARY="$PWD/target/release/fn-media-cache" cargo test --locked --test black_box
 ```
 
 这些测试使用临时目录、虚构凭据和本机模拟服务器，不需要真实影视账号。模拟测试不代表所有飞牛版本、播放器或真实网络环境均已通过验证。

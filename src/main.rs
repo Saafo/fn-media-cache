@@ -1,5 +1,6 @@
 mod automation_store;
 mod config;
+mod doctor;
 mod engine;
 mod fntv;
 mod library;
@@ -54,6 +55,13 @@ enum Command {
         #[arg(long)]
         config: Option<PathBuf>,
     },
+    /// Check the configured local management and proxy endpoints without credentials.
+    Doctor {
+        #[arg(long)]
+        config: Option<PathBuf>,
+        #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u64).range(1..=120))]
+        timeout_seconds: u64,
+    },
 }
 
 #[tokio::main]
@@ -80,6 +88,17 @@ async fn main() -> Result<()> {
                 event!("service stopped with error: {error}");
                 return Err(error);
             }
+        }
+        Command::Doctor {
+            config,
+            timeout_seconds,
+        } => {
+            let config = config.unwrap_or_else(|| config::configuration_path(Path::new(".")));
+            doctor::run(
+                &Config::load(&config)?,
+                Duration::from_secs(timeout_seconds),
+            )
+            .await?;
         }
     }
     Ok(())

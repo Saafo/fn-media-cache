@@ -326,6 +326,7 @@ dependencies = [
  "clap",
  "fs2",
  "futures-util",
+ "libc",
  "md-5",
  "reqwest",
  "rusqlite",
