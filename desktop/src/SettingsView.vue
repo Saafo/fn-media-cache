@@ -14,7 +14,7 @@ const policyMessage = ref('')
 const serverMessage = ref('')
 const savingPolicy = ref(false)
 const savingServer = ref(false)
-const savedPolicy = ref('')
+const savedPolicy = ref<Policy>()
 const savedServer = ref('')
 
 type NumericKey = Exclude<keyof Policy, 'incognito' | 'local_history' | 'auto_prefetch' | 'pause_during_playback' | 'prevent_idle_sleep' | 'cleanup_enabled' | 'prefetch_after_seconds'>
@@ -49,7 +49,7 @@ const policyPayload = computed(() => {
   return payload
 })
 const serverPayload = computed(() => server.value && normalizeServer(server.value, alternates.value.split('\n')))
-const policyChanged = computed(() => Boolean(policyPayload.value) && JSON.stringify(policyPayload.value) !== savedPolicy.value)
+const policyChanged = computed(() => Boolean(policyPayload.value) && JSON.stringify(policyPayload.value) !== JSON.stringify(savedPolicy.value))
 const serverChanged = computed(() => Boolean(serverPayload.value) && JSON.stringify(serverPayload.value) !== savedServer.value)
 const historyNote = computed(() => ({
   sync: '',
@@ -80,13 +80,22 @@ watch(() => props.snapshot, snapshot => {
     policy.value = undefined
     return
   }
-  if (policy.value) return
   const { automation } = snapshot
+  if (policy.value && savedPolicy.value) {
+    if (!savingPolicy.value) {
+      const enabled = automation.policy.prevent_idle_sleep
+      if (policy.value.prevent_idle_sleep === savedPolicy.value.prevent_idle_sleep) {
+        policy.value.prevent_idle_sleep = enabled
+      }
+      savedPolicy.value.prevent_idle_sleep = enabled
+    }
+    return
+  }
   const values = { ...automation.policy, cache_limit_bytes: automation.cache_limit_bytes }
   policy.value = values
   mode.value = values.incognito ? 'incognito' : values.local_history ? 'local' : 'sync'
   for (const [key, , , , scale = 1] of fields) numbers[key] = values[key] / scale
-  savedPolicy.value = JSON.stringify(policyPayload.value)
+  savedPolicy.value = policyPayload.value
 }, { immediate: true })
 
 watch(policyPayload, () => {
@@ -102,8 +111,9 @@ async function savePolicy() {
   savingPolicy.value = true
   policyMessage.value = ''
   try {
-    await post('/automation/policy', payload)
-    savedPolicy.value = JSON.stringify(payload)
+    const { prevent_idle_sleep, ...otherPreferences } = payload
+    await post('/automation/policy', prevent_idle_sleep === savedPolicy.value?.prevent_idle_sleep ? otherPreferences : payload)
+    savedPolicy.value = payload
     policyMessage.value = policyChanged.value ? '' : '已保存。'
     emit('refresh')
   } catch (error) {

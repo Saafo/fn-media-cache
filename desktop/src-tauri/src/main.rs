@@ -10,11 +10,15 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
+#[cfg(target_os = "macos")]
+use tauri::menu::CheckMenuItem;
 use tauri::{
     Manager, State,
-    menu::{Menu, MenuItem},
+    menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
 };
+#[cfg(target_os = "macos")]
+use tokio::sync::watch;
 
 #[tauri::command]
 async fn service_status(state: State<'_, Arc<Controller>>) -> Result<Status, String> {
@@ -44,6 +48,35 @@ fn show(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.set_focus();
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn sync_sleep_menu(
+    controller: &Controller,
+    item: CheckMenuItem<tauri::Wry>,
+    mut changes: watch::Receiver<Option<bool>>,
+) {
+    let mut ticks = tokio::time::interval(std::time::Duration::from_secs(2));
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        let change = tokio::select! {
+            biased;
+            result = changes.changed() => {
+                if result.is_err() {
+                    break;
+                }
+                *changes.borrow_and_update()
+            }
+            _ = ticks.tick() => None,
+        };
+        let enabled = match controller.prevent_idle_sleep(change).await {
+            Ok(enabled) => Some(enabled),
+            Err(_) if change.is_some() => controller.prevent_idle_sleep(None).await.ok(),
+            Err(_) => None,
+        };
+        let _ = item.set_checked(enabled.unwrap_or(false));
+        let _ = item.set_enabled(enabled.is_some());
     }
 }
 
@@ -86,23 +119,41 @@ fn main() {
             };
             let controller = Arc::new(Controller::new(root, daemon, development)?);
             app.manage(Arc::clone(&controller));
-            let items = [
-                MenuItem::with_id(app, "show", "打开 FN Media Cache", true, None::<&str>)?,
-                MenuItem::with_id(app, "logs", "打开日志目录", true, None::<&str>)?,
-                MenuItem::with_id(app, "quit", "退出 FN Media Cache", true, None::<&str>)?,
-            ];
+            #[cfg(target_os = "macos")]
+            let sleep_item = CheckMenuItem::with_id(
+                app,
+                "prevent-idle-sleep",
+                "播放或下载时防止休眠",
+                false,
+                false,
+                None::<&str>,
+            )?;
+            #[cfg(target_os = "macos")]
+            let (change_sleep, sleep_changes) = watch::channel(None);
             let menu = Menu::with_items(
                 app,
-                &items
-                    .iter()
-                    .map(|i| i as &dyn tauri::menu::IsMenuItem<_>)
-                    .collect::<Vec<_>>(),
+                &[
+                    #[cfg(target_os = "macos")]
+                    &sleep_item,
+                    &MenuItem::with_id(app, "logs", "打开日志目录", true, None::<&str>)?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &MenuItem::with_id(app, "show", "打开 FN Media Cache", true, None::<&str>)?,
+                    &MenuItem::with_id(app, "quit", "退出 FN Media Cache", true, None::<&str>)?,
+                ],
             )?;
+            #[cfg(target_os = "macos")]
+            let clicked_sleep_item = sleep_item.clone();
             let tray = TrayIconBuilder::new()
                 .tooltip("FN Media Cache")
                 .menu(&menu)
-                .on_menu_event(|app, event| match event.id.as_ref() {
+                .on_menu_event(move |app, event| match event.id.as_ref() {
                     "show" => show(app),
+                    #[cfg(target_os = "macos")]
+                    "prevent-idle-sleep" => {
+                        if let Ok(enabled) = clicked_sleep_item.is_checked() {
+                            change_sleep.send_replace(Some(enabled));
+                        }
+                    }
                     "logs" => {
                         let _ = app.state::<Arc<Controller>>().open_logs();
                     }
@@ -122,6 +173,8 @@ fn main() {
             tray.build(app)?;
             tauri::async_runtime::spawn(async move {
                 controller.start_on_launch().await;
+                #[cfg(target_os = "macos")]
+                sync_sleep_menu(&controller, sleep_item, sleep_changes).await;
             });
             Ok(())
         })

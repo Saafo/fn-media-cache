@@ -48,6 +48,10 @@ pub fn admin_router(engine: Arc<Engine>) -> Router {
         .route("/library/download", post(library_download))
         .route("/automation", get(automation))
         .route("/automation/policy", post(save_policy))
+        .route(
+            "/automation/prevent-idle-sleep",
+            get(prevent_idle_sleep).post(save_prevent_idle_sleep),
+        )
         .route("/managed/retention", post(retention))
         .route("/observations/{id}/probe", post(probe))
         .route("/downloads", get(downloads).post(enqueue))
@@ -383,8 +387,15 @@ async fn automation(State(engine): State<Arc<Engine>>) -> ApiResult<serde_json::
 
 async fn save_policy(
     State(engine): State<Arc<Engine>>,
-    Json(policy): Json<crate::scheduler::Policy>,
+    Json(input): Json<serde_json::Value>,
 ) -> ApiResult<serde_json::Value> {
+    let changes_sleep = input.get("prevent_idle_sleep").is_some();
+    let mut policy: crate::scheduler::Policy = serde_json::from_value(input).map_err(|_| {
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid automation policy",
+        )
+    })?;
     policy.validate().map_err(|_| {
         (
             StatusCode::BAD_REQUEST,
@@ -393,6 +404,9 @@ async fn save_policy(
     })?;
     {
         let mut active = engine.policy.write().unwrap();
+        if !changes_sleep {
+            policy.prevent_idle_sleep = active.prevent_idle_sleep;
+        }
         let clear = active.local_history != policy.local_history || policy.incognito;
         engine
             .store
@@ -423,6 +437,37 @@ async fn save_policy(
     }
     engine.scheduler_wake.notify_one();
     Ok(Json(json!({"ok":true})))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IdleSleepPreference {
+    enabled: bool,
+}
+
+async fn prevent_idle_sleep(State(engine): State<Arc<Engine>>) -> ApiResult<serde_json::Value> {
+    let enabled = engine.policy.read().unwrap().prevent_idle_sleep;
+    Ok(Json(json!({ "enabled": enabled })))
+}
+
+async fn save_prevent_idle_sleep(
+    State(engine): State<Arc<Engine>>,
+    Json(input): Json<IdleSleepPreference>,
+) -> ApiResult<serde_json::Value> {
+    let mut active = engine.policy.write().unwrap();
+    if input.enabled != active.prevent_idle_sleep {
+        let mut policy = active.clone();
+        policy.prevent_idle_sleep = input.enabled;
+        engine
+            .store
+            .save_policy(&policy, false)
+            .map_err(catalog_error)?;
+        if !input.enabled {
+            engine.power.clear_reports();
+        }
+        *active = policy;
+    }
+    Ok(Json(json!({ "enabled": active.prevent_idle_sleep })))
 }
 
 #[derive(Deserialize)]

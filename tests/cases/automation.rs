@@ -7,6 +7,32 @@ use std::{
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn idle_sleep_preference_survives_other_policy_changes_and_restart() {
+    let origin = Origin::new(Mode::Catalog);
+    let mut h = Harness::new(std::slice::from_ref(&origin.url)).await;
+    let path = "/automation/prevent-idle-sleep";
+    let mut policy = h.policy(json!({ "bytes_per_second": 1234 })).await;
+    assert_eq!(h.api(path, None).await, json!({ "enabled": false }));
+    let enabled = json!({ "enabled": true });
+    assert_eq!(h.api(path, Some(enabled.clone())).await, enabled);
+    policy["prevent_idle_sleep"] = json!(true);
+    assert_eq!(h.api("/automation", None).await["policy"], policy);
+
+    policy["cleanup_enabled"] = json!(false);
+    let mut other_preferences = policy.as_object().unwrap().clone();
+    other_preferences.remove("prevent_idle_sleep");
+    h.api("/automation/policy", Some(other_preferences.into()))
+        .await;
+    assert_eq!(h.api("/automation", None).await["policy"], policy);
+    h.restart(false).await;
+    assert_eq!(h.api(path, None).await, enabled);
+
+    policy["prevent_idle_sleep"] = json!(false);
+    h.api("/automation/policy", Some(policy)).await;
+    assert_eq!(h.api(path, None).await, json!({ "enabled": false }));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn catalog_prefetch_and_cleanup() {
     let origin = Origin::new(Mode::Catalog);
     let mut h = Harness::new(std::slice::from_ref(&origin.url)).await;

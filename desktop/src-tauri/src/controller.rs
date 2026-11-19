@@ -395,6 +395,28 @@ impl Controller {
         });
         Ok(AdminResponse { status, body })
     }
+    #[cfg(target_os = "macos")]
+    pub async fn prevent_idle_sleep(&self, enabled: Option<bool>) -> Result<bool> {
+        let child = self.child.lock().await;
+        if child.is_none() || *self.quitting.borrow() {
+            bail!("后台未运行");
+        }
+        let response = tokio::time::timeout(
+            Duration::from_secs(2),
+            self.admin(
+                "/automation/prevent-idle-sleep".into(),
+                enabled.map(|enabled| serde_json::json!({ "enabled": enabled })),
+            ),
+        )
+        .await??;
+        if response.status != 200 {
+            bail!("无法获取或保存防止休眠偏好");
+        }
+        response.body["enabled"]
+            .as_bool()
+            .context("后台未返回防止休眠状态")
+    }
+
     pub fn open_logs(&self) -> Result<()> {
         let directory = self.config()?.data_dir.join("logs");
         private_dir(&directory)?;

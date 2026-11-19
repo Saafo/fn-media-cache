@@ -159,7 +159,7 @@ interface Reads {
 
 interface Writes {
   '/downloads': [{ observation_id: string; paused?: boolean }, { id: string }]
-  '/automation/policy': [Policy, { ok: boolean }]
+  '/automation/policy': [Omit<Policy, 'prevent_idle_sleep'> & { prevent_idle_sleep?: boolean }, { ok: boolean }]
   '/library/search': [{ session_id: string; page: number; query: string }, CatalogPage]
   '/library/browse': [{ session_id: string; page: number; item_guid: string }, CatalogPage]
   '/library/series': [{ session_id: string; item_guid: string }, MediaItem]
