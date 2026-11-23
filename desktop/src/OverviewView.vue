@@ -19,6 +19,12 @@ let reading = false
 let generation = 0
 
 const playback = computed(() => props.snapshot?.stats.playback ?? [])
+const hasReadCoverage = computed(() => playback.value.some(item => item.read_coverage))
+const readCoverageLegend = [
+  { color: 'chart-unread', label: '未读取' },
+  { color: 'chart-cached', label: '命中缓存' },
+  { color: 'chart-active', label: '回源' },
+]
 const media = computed(() => props.snapshot?.automation.managed ?? [])
 const rangePrefix = '/v/api/v1/media/range/'
 const readTotals = computed(() => {
@@ -215,11 +221,23 @@ async function capture(item: ProxyRequest, sample: boolean) {
               <span class="chart-active" :style="{ flexGrow: 100 - localShare }"></span>
             </div>
           </div>
+          <div v-if="hasReadCoverage" class="read-legend playback-coverage-legend hint">
+            <span v-for="{ color, label } in readCoverageLegend" :key="color">
+              <span class="chart-key" :class="color"></span>{{ label }}
+            </span>
+          </div>
           <table v-if="playback.length" aria-label="播放读取">
             <thead><tr><th scope="col">影片</th><th scope="col">状态</th><th scope="col">本地</th><th scope="col">回源</th></tr></thead>
             <tbody>
               <tr v-for="item in playback" :key="item.id || item.path">
-                <td class="path" :title="item.path">{{ playbackTitle(item) }}</td>
+                <td class="path">
+                  <span :title="item.path">{{ playbackTitle(item) }}</span>
+                  <div v-if="item.read_coverage" class="data-strip playback-coverage"
+                    role="img" aria-label="按文件字节位置的读取分布" title="按文件字节位置的读取分布">
+                    <span v-for="(run, index) in item.read_coverage.match(/0+|1+|2+/g)" :key="index"
+                      :class="readCoverageLegend[Number(run[0])].color" :style="{ flexGrow: run.length }"></span>
+                  </div>
+                </td>
                 <td>{{ item.active_requests ? '读取中' : '最近读过' }}</td>
                 <td class="number">{{ size(item.local_bytes) }}</td>
                 <td class="number">{{ size(item.upstream_bytes) }}</td>

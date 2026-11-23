@@ -22,6 +22,49 @@ pub struct Playback {
     pub upstream_bytes: u64,
     pub active_requests: usize,
     pub last_seen_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    read_coverage: Option<ReadCoverage>,
+}
+
+const COVERAGE_BUCKETS: usize = 256;
+
+#[derive(Clone)]
+struct ReadCoverage {
+    total: u64,
+    // ASCII states for compact serialization: 0 unread, 1 cached, 2 upstream.
+    buckets: [u8; COVERAGE_BUCKETS],
+}
+
+impl ReadCoverage {
+    fn new(total: u64) -> Self {
+        Self {
+            total,
+            buckets: [b'0'; COVERAGE_BUCKETS],
+        }
+    }
+
+    fn mark(&mut self, start: u64, end: u64, source: u8) {
+        if start == end {
+            return;
+        }
+        let scale = COVERAGE_BUCKETS as u128;
+        let total = u128::from(self.total);
+        let first = u128::from(start) * scale / total;
+        let end = (u128::from(end) * scale).div_ceil(total);
+        self.buckets[first as usize..end as usize].fill(source);
+    }
+}
+
+impl Serialize for ReadCoverage {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&String::from_utf8_lossy(&self.buckets))
+    }
+}
+
+pub struct PlaybackRange {
+    pub offset: u64,
+    pub end_exclusive: u64,
+    pub total: u64,
 }
 
 #[derive(Clone, Copy, Default, Serialize)]
@@ -115,6 +158,7 @@ pub struct Reading {
     transfers: Arc<Transfers>,
     id: String,
     generation: u64,
+    range: Option<PlaybackRange>,
 }
 fn now_ms() -> u64 {
     crate::scheduler::now().max(0) as u64 * 1000
@@ -152,6 +196,7 @@ impl Transfers {
         download_id: Option<String>,
         path: String,
         item: Option<MediaItem>,
+        range: Option<PlaybackRange>,
     ) -> Reading {
         let mut state = self.state.lock().unwrap();
         if state.playback.len() >= 100
@@ -174,10 +219,19 @@ impl Transfers {
             upstream_bytes: 0,
             active_requests: 0,
             last_seen_ms: now_ms(),
+            read_coverage: None,
         });
         entry.download_id = download_id.or(entry.download_id.clone());
         if item.is_some() {
             entry.item = item;
+        }
+        if let Some(range) = &range
+            && entry
+                .read_coverage
+                .as_ref()
+                .is_none_or(|coverage| coverage.total != range.total)
+        {
+            entry.read_coverage = Some(ReadCoverage::new(range.total));
         }
         entry.active_requests += 1;
         entry.last_seen_ms = now_ms();
@@ -185,6 +239,7 @@ impl Transfers {
             transfers: self.clone(),
             id,
             generation: state.generation,
+            range,
         }
     }
     pub fn playback(&self) -> (PlaybackTotals, Vec<Playback>) {
@@ -238,7 +293,7 @@ impl Transfers {
     }
 }
 impl Reading {
-    pub fn bytes(&self, local: u64, upstream: u64) {
+    pub fn bytes(&mut self, local: u64, upstream: u64) {
         let mut state = self.transfers.state.lock().unwrap();
         if state.generation != self.generation {
             return;
@@ -247,6 +302,17 @@ impl Reading {
             entry.local_bytes += local;
             entry.upstream_bytes += upstream;
             entry.last_seen_ms = now_ms();
+            if let Some(range) = &mut self.range {
+                let local_end = range.offset.saturating_add(local).min(range.end_exclusive);
+                let end = local_end.saturating_add(upstream).min(range.end_exclusive);
+                if let Some(coverage) = &mut entry.read_coverage
+                    && coverage.total == range.total
+                {
+                    coverage.mark(range.offset, local_end, b'1');
+                    coverage.mark(local_end, end, b'2');
+                }
+                range.offset = end;
+            }
             state.playback_totals.local_bytes += local;
             state.playback_totals.upstream_bytes += upstream;
         }

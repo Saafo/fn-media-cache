@@ -23,8 +23,11 @@ use tokio_util::io::ReaderStream;
 use crate::{
     engine::Engine,
     local_history,
-    protocol::{Range, Source, clean_headers, parse_range, strong_etag, text_header},
+    protocol::{
+        Range, Source, clean_headers, parse_content_range, parse_range, strong_etag, text_header,
+    },
     store::Download,
+    transfers::PlaybackRange,
 };
 
 pub fn proxy_router(engine: Arc<Engine>) -> Router {
@@ -717,7 +720,7 @@ async fn proxy(
         let mut trace = trace
             .filter(|_| (media || media_target) && !policy.incognito)
             .map(|trace| trace.response(engine.transfers.clone(), &source, &response));
-        let reading = (media && !policy.incognito).then(|| {
+        let mut reading = (media && !policy.incognito).then(|| {
             let download = engine
                 .store
                 .get_for_source(&source)
@@ -725,9 +728,13 @@ async fn proxy(
                 .flatten()
                 .map(|d| d.id);
             let item = engine.history_metadata.display_item(&source);
-            engine
-                .transfers
-                .start(source.cache_id(), download, source.display_path(), item)
+            engine.transfers.start(
+                source.cache_id(),
+                download,
+                source.display_path(),
+                item,
+                playback_range(&response),
+            )
         });
         drop(policy);
         let mut local_left = response
@@ -755,7 +762,7 @@ async fn proxy(
                     let bytes = chunk.len() as u64;
                     let local = local_left.min(bytes);
                     local_left = local_left.saturating_sub(local);
-                    if let Some(reading) = &reading {
+                    if let Some(reading) = &mut reading {
                         reading.bytes(local, bytes - local);
                     }
                     if let Some(trace) = &mut trace {
@@ -774,6 +781,41 @@ async fn proxy(
         Response::from_parts(parts, Body::from_stream(stream))
     } else {
         response
+    }
+}
+
+fn playback_range(response: &Response) -> Option<PlaybackRange> {
+    let headers = response.headers();
+    if headers
+        .get(header::CONTENT_ENCODING)
+        .is_some_and(|value| !value.as_bytes().eq_ignore_ascii_case(b"identity"))
+    {
+        return None;
+    }
+    match response.status() {
+        StatusCode::PARTIAL_CONTENT => {
+            let value = headers.get(header::CONTENT_RANGE)?.to_str().ok()?;
+            let (start, end, total) = parse_content_range(value)?;
+            Some(PlaybackRange {
+                offset: start,
+                end_exclusive: end + 1,
+                total,
+            })
+        }
+        StatusCode::OK => {
+            let total = headers
+                .get(header::CONTENT_LENGTH)?
+                .to_str()
+                .ok()?
+                .parse()
+                .ok()?;
+            (total > 0).then_some(PlaybackRange {
+                offset: 0,
+                end_exclusive: total,
+                total,
+            })
+        }
+        _ => None,
     }
 }
 

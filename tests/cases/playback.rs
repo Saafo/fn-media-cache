@@ -92,6 +92,12 @@ async fn downloads_yield_only_to_origin_playback() {
     assert_eq!(job["downloaded"], downloaded);
     assert_eq!(job["bytes_per_second"], 0);
     assert_eq!(job["waiting_reason"], "playback");
+    let cached_prefix = format!("11{}", "0".repeat(254));
+    until(
+        "coverage records only the transferred prefix while origin is held",
+        || async { h.api("/stats", None).await["playback"][0]["read_coverage"] == cached_prefix },
+    )
+    .await;
 
     origin.release();
     assert_eq!(
@@ -99,7 +105,12 @@ async fn downloads_yield_only_to_origin_playback() {
         &native_data(Mode::Task, "prefetched", 1)[..1048576]
     );
     assert_eq!(h.api("/automation", None).await["downloads_yielding"], true);
-    let playback_totals = h.api("/stats", None).await["playback_totals"].clone();
+    let stats = h.api("/stats", None).await;
+    let playback_totals = &stats["playback_totals"];
+    assert_eq!(
+        stats["playback"][0]["read_coverage"],
+        format!("11{}{}", "2".repeat(30), "0".repeat(224))
+    );
     assert_eq!(
         playback_totals["local_bytes"].as_u64().unwrap(),
         before_playback["local_bytes"].as_u64().unwrap() + downloaded
@@ -133,6 +144,10 @@ async fn downloads_yield_only_to_origin_playback() {
         after_download["playback_totals"],
         before_download["playback_totals"]
     );
+    assert_eq!(
+        after_download["playback"][0]["read_coverage"],
+        before_download["playback"][0]["read_coverage"]
+    );
     assert!(
         after_download["origin_bytes"].as_u64().unwrap()
             > before_download["origin_bytes"].as_u64().unwrap()
@@ -148,8 +163,23 @@ async fn downloads_yield_only_to_origin_playback() {
             .iter()
             .any(|call| { call.path == path && call.range.as_deref() == Some("bytes=1048608-") })
     );
-    let cached = cache_only(&h, &path, &token, "bytes=0-31").await;
-    assert_eq!(cached.header("x-fn-media-cache"), "HIT");
+    for range in ["bytes=65536-65567", "bytes=6553600-6553631"] {
+        assert_eq!(
+            cache_only(&h, &path, &token, range)
+                .await
+                .header("x-fn-media-cache"),
+            "HIT"
+        );
+    }
+    assert_eq!(
+        h.api("/stats", None).await["playback"][0]["read_coverage"],
+        format!(
+            "111{}{}1{}",
+            "2".repeat(30),
+            "0".repeat(167),
+            "0".repeat(55)
+        )
+    );
     assert_eq!(
         h.api("/automation", None).await["downloads_yielding"],
         false

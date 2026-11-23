@@ -84,6 +84,7 @@ export interface Stats {
     active_requests: number
     local_bytes: number
     upstream_bytes: number
+    read_coverage?: string
   }[]
 }
 
