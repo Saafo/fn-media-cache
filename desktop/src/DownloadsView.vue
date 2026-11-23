@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
-import { ApiError, post } from './api'
+import { computed, nextTick, ref, watch } from 'vue'
+import { ApiError, jobAction, post } from './api'
 import type { Download, ManagedMedia, MediaItem, Snapshot } from './api'
-import { downloadSpeed, duration, reorderStates, size, waitingStates } from './downloads'
+import { canControlDownload, downloadSpeed, duration, reorderStates, size, waitingStates } from './downloads'
+import type { DownloadControl } from './downloads'
 import DownloadRow from './DownloadRow.vue'
 
 const props = defineProps<{ snapshot?: Snapshot; visible: boolean }>()
@@ -13,6 +14,11 @@ const filters = [
 ] as const
 type Filter = typeof filters[number][0]
 const selected = ref<Filter>('all')
+const picked = ref(new Set<string>())
+const batchBusy = ref(false)
+const confirmingDelete = ref(false)
+const confirmDeleteButton = ref<HTMLButtonElement>()
+const selectionLocked = computed(() => batchBusy.value || confirmingDelete.value)
 const openMenu = ref('')
 const expanded = ref(new Set<string>())
 const seriesBySeason = ref(new Map<string, MediaItem>())
@@ -40,9 +46,72 @@ const tasks = computed(() => {
   if (selected.value === 'waiting') return waiting.value
   return downloads.value.filter(job => job.state === selected.value)
 })
+const pickedTasks = computed(() => tasks.value.filter(job => picked.value.has(job.id)))
+const allPicked = computed(() => tasks.value.length > 0 && pickedTasks.value.length === tasks.value.length)
+const commands = [['pause', '暂停'], ['resume', '继续'], ['cancel', '取消任务'], ['delete', '删除缓存']] as const
+const batchActions = computed(() => commands.map(([command, label]) => ({
+  command, label, jobs: pickedTasks.value.filter(job => canControlDownload(job.state, command)),
+})).filter(action => action.jobs.length))
+const deletableCount = computed(() => batchActions.value.find(action => action.command === 'delete')?.jobs.length ?? 0)
+
+function chooseFilter(filter: Filter) {
+  if (filter === selected.value) return
+  picked.value.clear()
+  selected.value = filter
+}
+
+function pickTask(id: string, value: boolean) {
+  if (value) picked.value.add(id)
+  else picked.value.delete(id)
+}
+
+function pickTasks(jobs: Download[], event: Event) {
+  const value = (event.currentTarget as HTMLInputElement).checked
+  for (const job of jobs) pickTask(job.id, value)
+}
+
+async function runBatch(command: DownloadControl) {
+  if (batchBusy.value) return
+  const action = batchActions.value.find(action => action.command === command)
+  if (!action) return
+  openMenu.value = ''
+  if (command === 'delete' && !confirmingDelete.value) {
+    confirmingDelete.value = true
+    await nextTick()
+    confirmDeleteButton.value?.focus()
+    return
+  }
+  confirmingDelete.value = false
+  batchBusy.value = true
+  emit('notice', '')
+  let completed = 0
+  try {
+    for (const job of action.jobs) {
+      if (!picked.value.has(job.id)) continue
+      try {
+        await jobAction(job, command)
+        picked.value.delete(job.id)
+        completed++
+      } catch {
+        // Keep unsuccessful tasks selected so the same operation can be retried.
+      }
+    }
+    const result = command === 'delete' ? '已请求删除' : `已${action.label}`
+    const incomplete = action.jobs.length - completed
+    emit('notice', `${result} ${completed} 项${incomplete ? `，${incomplete} 项未成功` : ''}。`)
+  } finally {
+    batchBusy.value = false
+    emit('refresh')
+  }
+}
 
 type EpisodeTask = { job: Download; entry: ManagedMedia }
 type SeriesGroup = { key: string; title: string; episodes: EpisodeTask[] }
+
+function episodeSelection(episodes: EpisodeTask[]) {
+  const checked = episodes.every(({ job }) => picked.value.has(job.id))
+  return { checked, indeterminate: !checked && episodes.some(({ job }) => picked.value.has(job.id)) }
+}
 
 function seasonKey(entry: ManagedMedia) {
   return `${entry.session_id}/${entry.item.parent_guid}`
@@ -151,12 +220,19 @@ function toggleSeries(key: string) {
 }
 
 watch(() => props.visible, visible => {
-  if (!visible) openMenu.value = ''
+  if (!visible) {
+    openMenu.value = ''
+    confirmingDelete.value = false
+  }
   else void resolveSeries()
 })
 watch(automation, () => void resolveSeries(), { immediate: true })
 watch(tasks, values => {
   if (openMenu.value && !values.some(job => job.id === openMenu.value.split(':')[1])) openMenu.value = ''
+  if (picked.value.size) {
+    const visibleIds = new Set(values.map(job => job.id))
+    for (const id of picked.value) if (!visibleIds.has(id)) picked.value.delete(id)
+  }
 })
 
 function closeMenu(id: string) {
@@ -236,13 +312,36 @@ function badge(job: Download) {
           <div class="toolbar filters" aria-label="按状态筛选">
             <button
               v-for="[key, label] in filters" :key="key" type="button"
-              :aria-pressed="selected === key" @click="selected = key"
+              :aria-pressed="selected === key" :disabled="selectionLocked" @click="chooseFilter(key)"
             >{{ label }}</button>
           </div>
           <p v-if="downloadStatus" class="hint">{{ downloadStatus }}</p>
         </div>
+        <div v-if="pickedTasks.length || selectionLocked" class="toolbar table-tools">
+          <span role="status">{{ batchBusy ? '正在处理…' : `已选 ${pickedTasks.length} 项` }}</span>
+          <template v-if="confirmingDelete">
+            <button
+              ref="confirmDeleteButton" type="button" class="danger" :disabled="!deletableCount" @click="runBatch('delete')"
+            >确认删除 {{ deletableCount }} 项本地缓存</button>
+            <button type="button" @click="confirmingDelete = false">返回</button>
+          </template>
+          <template v-else>
+            <button
+              v-for="{ command, label, jobs } in batchActions" :key="command"
+              type="button" :class="{ danger: command === 'delete' }" :disabled="batchBusy" @click="runBatch(command)"
+            >{{ label }}（{{ jobs.length }}）</button>
+            <button type="button" :disabled="batchBusy" @click="picked.clear()">清空已选</button>
+          </template>
+        </div>
         <table class="download-table" aria-label="下载任务">
           <thead><tr>
+            <th scope="col" class="task-select">
+              <input
+                v-if="tasks.length" type="checkbox" aria-label="全选当前筛选结果"
+                :checked="allPicked" :indeterminate="!allPicked && pickedTasks.length > 0" :disabled="selectionLocked"
+                @change="pickTasks(tasks, $event)"
+              >
+            </th>
             <th scope="col">影片 / 剧集</th><th scope="col">状态</th><th scope="col">缓存量</th>
             <th scope="col">速度 / 剩余</th><th scope="col" class="align-end">操作</th>
           </tr></thead>
@@ -250,6 +349,13 @@ function badge(job: Download) {
             <template v-for="row in groups" :key="'episodes' in row ? row.key : row.id">
               <template v-if="'episodes' in row">
                 <tr class="task-series">
+                  <td class="task-select">
+                    <input
+                      type="checkbox" :aria-label="`选择 ${groupTitle(row)}`" :disabled="selectionLocked"
+                      v-bind="episodeSelection(row.episodes)"
+                      @change="pickTasks(row.episodes.map(({ job }) => job), $event)"
+                    >
+                  </td>
                   <th scope="row">
                     <button type="button" class="task-label" :aria-expanded="expanded.has(row.key)" @click="toggleSeries(row.key)">
                       <span aria-hidden="true">{{ expanded.has(row.key) ? '▾' : '▸' }}</span>
@@ -260,12 +366,22 @@ function badge(job: Download) {
                 </tr>
                 <template v-if="expanded.has(row.key)">
                   <template v-for="season in seasons(row)" :key="season.number">
-                    <tr v-if="seasons(row).length > 1" class="task-season"><th colspan="5" scope="colgroup">{{ seasonTitle(season.number) }}</th></tr>
+                    <tr class="task-season">
+                      <td class="task-select">
+                        <input
+                          type="checkbox" :aria-label="`选择 ${groupTitle(row)} ${seasonTitle(season.number)}`"
+                          :disabled="selectionLocked" v-bind="episodeSelection(season.episodes)"
+                          @change="pickTasks(season.episodes.map(({ job }) => job), $event)"
+                        >
+                      </td>
+                      <th colspan="5" scope="row">{{ seasonTitle(season.number) }}</th>
+                    </tr>
                     <DownloadRow
                       v-for="{ job, entry } in season.episodes" :key="job.id"
                       :job="job" :managed="managed.get(job.id) ?? []" :episode-item="entry.item"
                       :series-title="groupTitle(row)" :notes="notes(job)" :description="describe(job)" :transfer="transfer(job)"
                       :badge="badge(job)" :position="reorderIndex.get(job.id) ?? -1" :queue-length="reorderable.length"
+                      :selected="picked.has(job.id)" :batch-busy="selectionLocked" @select="pickTask(job.id, $event)"
                       :open-menu="openMenu" @open="openMenu = $event" @close="closeMenu($event)"
                       @refresh="emit('refresh')" @notice="emit('notice', $event)"
                     />
@@ -276,6 +392,7 @@ function badge(job: Download) {
                 v-else :job="row" :managed="managed.get(row.id) ?? []"
                 :notes="notes(row)" :description="describe(row)" :transfer="transfer(row)" :badge="badge(row)"
                 :position="reorderIndex.get(row.id) ?? -1" :queue-length="reorderable.length"
+                :selected="picked.has(row.id)" :batch-busy="selectionLocked" @select="pickTask(row.id, $event)"
                 :open-menu="openMenu" @open="openMenu = $event" @close="closeMenu($event)"
                 @refresh="emit('refresh')" @notice="emit('notice', $event)"
               />

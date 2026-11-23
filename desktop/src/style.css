@@ -118,8 +118,9 @@ progress::-moz-progress-bar { background: var(--accent); }
 .task-actions > .toolbar { min-height: 31px; flex-wrap: nowrap; justify-content: flex-end; }
 .task-series > * { background: var(--canvas); border-top: 1px solid var(--line); vertical-align: middle; }
 .task-series th { color: var(--text); white-space: normal; }
-.task-episode > :first-child { padding-left: 24px; }
-.task-season th { padding-block: 5px; border-top: 1px solid var(--line); }
+.task-select { width: 42px; }
+.task-episode > .path { padding-left: 24px; }
+.task-season > * { background: var(--canvas); padding-block: 5px; border-top: 1px solid var(--line); vertical-align: middle; }
 .task-label {
   padding: 0; border-color: transparent; background: transparent; color: inherit;
   text-align: left; white-space: normal; overflow-wrap: anywhere; font-weight: 650;
@@ -180,7 +181,6 @@ details summary { cursor: pointer; }
 .catalog-results > .catalog-header { border-radius: 11px 11px 0 0; }
 .catalog-scroll { overflow-x: auto; }
 .catalog-scroll label { cursor: pointer; }
-.catalog-picked > td { background: var(--selected); }
 .catalog-footer.selection-bar {
   position: sticky; bottom: 0; z-index: 1; background: var(--surface); border-radius: 0 0 12px 12px;
 }

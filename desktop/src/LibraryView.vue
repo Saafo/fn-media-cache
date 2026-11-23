@@ -248,6 +248,16 @@ function selectRange(item: MediaItem, extend: boolean) {
   void selectRows(rows.slice(Math.min(start, end), Math.max(start, end) + 1), true)
 }
 
+function toggleCheckbox(event: MouseEvent, item?: MediaItem) {
+  const input = event.currentTarget as HTMLInputElement
+  const wasChecked = item ? checked(item) : pageSelected.value
+  // Native activation toggles before the click handler. Restore the current selection until it updates.
+  input.checked = wasChecked
+  input.indeterminate = item ? partial(item) : pagePartial.value
+  if (item) selectRange(item, event.shiftKey)
+  else void selectRows(selectableRows.value, !wasChecked)
+}
+
 function listKeys(event: KeyboardEvent) {
   const input = event.target
   if (busy.value) return
@@ -373,19 +383,19 @@ async function enqueue() {
                 <input
                   v-if="selectableRows.length" type="checkbox" aria-label="全选当前页" title="全选当前页（⌘A / Ctrl+A）"
                   :checked="pageSelected" :indeterminate="pagePartial" :aria-disabled="busy"
-                  @click.prevent="selectRows(selectableRows, !pageSelected)"
+                  @click="toggleCheckbox($event)"
                 >
               </th>
               <th scope="col">名称</th><th scope="col">集数 / 类型</th><th scope="col">状态</th>
             </tr></thead>
             <tbody id="catalog">
-              <tr v-for="item in items" :key="item.guid" :class="{ 'catalog-picked': checked(item) || partial(item) }">
+              <tr v-for="item in items" :key="item.guid">
                 <td>
                   <input
                     v-if="playable(item) || item.kind === 'Season'" :id="'pick-' + item.guid" type="checkbox"
                     :aria-label="(item.kind === 'Season' ? '选择整季 ' : '选择 ') + (item.title || item.guid)" :data-guid="item.guid"
                     :checked="checked(item)" :indeterminate="partial(item)" :disabled="!canSelect(item)" :aria-disabled="busy"
-                    @click.prevent="selectRange(item, $event.shiftKey)"
+                    @click="toggleCheckbox($event, item)"
                   >
                 </td>
                 <td>

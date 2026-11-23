@@ -17,8 +17,10 @@ const props = defineProps<{
   position: number
   queueLength: number
   openMenu: string
+  selected: boolean
+  batchBusy: boolean
 }>()
-const emit = defineEmits<{ refresh: []; notice: [message: string]; open: [key: string]; close: [key: string] }>()
+const emit = defineEmits<{ refresh: []; notice: [message: string]; open: [key: string]; close: [key: string]; select: [value: boolean] }>()
 const number = computed(() => episodeNumber(props.episodeItem))
 const title = computed(() => {
   const item = props.episodeItem
@@ -42,6 +44,12 @@ function toggle(key: string) {
 
 <template>
   <tr :data-id="job.id" :class="{ 'task-episode': episodeItem }">
+    <td class="task-select">
+      <input
+        type="checkbox" :aria-label="`选择 ${label}`" :checked="selected" :disabled="batchBusy"
+        @change="emit('select', ($event.currentTarget as HTMLInputElement).checked)"
+      >
+    </td>
     <td class="path">
       <TaskPopover
         v-if="notes || description" :open="openMenu === detailKey" :label="`${label}的任务详情`" trigger-class="task-label"
@@ -64,7 +72,7 @@ function toggle(key: string) {
     <td>{{ transfer }}</td>
     <td class="task-actions">
       <DownloadActions
-        :job="job" :managed="managed" :position="position" :queue-length="queueLength"
+        :job="job" :managed="managed" :position="position" :queue-length="queueLength" :batch-busy="batchBusy"
         :menu-open="openMenu === actionKey" @toggle-menu="toggle(actionKey)" @close-menu="emit('close', actionKey)"
         @refresh="emit('refresh')" @notice="emit('notice', $event)"
       />

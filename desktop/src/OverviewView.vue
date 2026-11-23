@@ -34,7 +34,10 @@ const readTotals = computed(() => playback.value.reduce((totals, reading) => {
 }, { local: 0, origin: 0 }))
 const bytesRead = computed(() => readTotals.value.local + readTotals.value.origin)
 const localShare = computed(() => bytesRead.value ? 100 * readTotals.value.local / bytesRead.value : 0)
-const downloadRate = computed(() => downloadSpeed(props.snapshot?.downloads ?? []))
+const downloadRate = computed(() => {
+  const jobs = props.snapshot?.downloads ?? []
+  return jobs.some(job => job.state === 'downloading') ? downloadSpeed(jobs) : null
+})
 const downloadSummary = computed(() => {
   const counts = new Map<JobState, number>()
   for (const { state } of props.snapshot?.downloads ?? []) counts.set(state, (counts.get(state) ?? 0) + 1)
@@ -179,7 +182,7 @@ async function capture(item: ProxyRequest, sample: boolean) {
         <div class="panel-head">
           <h2 id="download-overview-title">下载状态</h2>
           <div class="download-overview-meta">
-            <p class="download-rate"><span class="hint">下载速度</span><strong class="number">{{ size(downloadRate) }}/s</strong></p>
+            <p v-if="downloadRate !== null" class="download-rate"><span class="hint">下载速度</span><strong class="number">{{ size(downloadRate) }}/s</strong></p>
             <button type="button" @click="emit('showTasks')">查看任务</button>
           </div>
         </div>

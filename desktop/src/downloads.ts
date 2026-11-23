@@ -1,11 +1,22 @@
-import type { Download, JobState, ManagedMedia, MediaItem } from './api'
+import type { Download, DownloadCommand, JobState, ManagedMedia, MediaItem } from './api'
 
 export const MiB = 1_048_576
 export const GiB = 1_073_741_824
 
 export const waitingStates = new Set<JobState>(['queued', 'waiting_space', 'waiting_login', 'retry_wait'])
-export const pauseStates = new Set<JobState>(['queued', 'downloading', 'waiting_space', 'retry_wait', 'waiting_login'])
-export const resumeStates = new Set<JobState>(['paused', 'failed', 'retry_wait', 'waiting_login', 'cancelled', 'removed'])
+const pauseStates = new Set<JobState>(['queued', 'downloading', 'waiting_space', 'retry_wait', 'waiting_login'])
+const resumeStates = new Set<JobState>(['paused', 'failed', 'retry_wait', 'waiting_login', 'cancelled', 'removed'])
+export type DownloadControl = Extract<DownloadCommand, 'pause' | 'resume' | 'cancel' | 'delete'>
+
+export function canControlDownload(state: JobState, command: DownloadControl) {
+  switch (command) {
+    case 'pause': return pauseStates.has(state)
+    case 'resume': return resumeStates.has(state)
+    case 'cancel': return pauseStates.has(state) || state === 'paused' || state === 'failed'
+    case 'delete': return state !== 'removed' && state !== 'deleting'
+  }
+}
+
 export const reorderStates = new Set<JobState>([...waitingStates, 'paused', 'failed'])
 export const jobStates: Record<JobState, string> = {
   queued: '排队中', downloading: '下载中', complete: '已缓存', paused: '已暂停', failed: '失败',

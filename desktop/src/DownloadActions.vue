@@ -2,7 +2,7 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import { errorText, jobAction, post } from './api'
 import type { Download, DownloadCommand, ManagedMedia } from './api'
-import { pauseStates, resumeStates } from './downloads'
+import { canControlDownload } from './downloads'
 import TaskPopover from './TaskPopover.vue'
 
 const props = defineProps<{
@@ -11,16 +11,18 @@ const props = defineProps<{
   position: number
   queueLength: number
   menuOpen: boolean
+  batchBusy: boolean
 }>()
 const emit = defineEmits<{ refresh: []; notice: [message: string]; toggleMenu: []; closeMenu: [] }>()
-const busy = ref(false)
+const running = ref(false)
+const busy = computed(() => running.value || props.batchBusy)
 const confirming = ref(false)
 const confirmButton = ref<HTMLButtonElement>()
 const removeButton = ref<HTMLButtonElement>()
-const canPause = computed(() => pauseStates.has(props.job.state))
-const canResume = computed(() => resumeStates.has(props.job.state))
-const canCancel = computed(() => !['complete', 'cancelled', 'removed', 'deleting'].includes(props.job.state))
-const canDelete = computed(() => !['removed', 'deleting'].includes(props.job.state))
+const canPause = computed(() => canControlDownload(props.job.state, 'pause'))
+const canResume = computed(() => canControlDownload(props.job.state, 'resume'))
+const canCancel = computed(() => canControlDownload(props.job.state, 'cancel'))
+const canDelete = computed(() => canControlDownload(props.job.state, 'delete'))
 const canManage = computed(() => canDelete.value && props.managed.length > 0)
 
 watch(() => props.menuOpen, open => {
@@ -32,7 +34,7 @@ watch(() => props.job.state, () => {
 
 async function run(operation: () => Promise<unknown>, message = '') {
   if (busy.value) return
-  busy.value = true
+  running.value = true
   emit('notice', '')
   try {
     await operation()
@@ -42,7 +44,7 @@ async function run(operation: () => Promise<unknown>, message = '') {
   } catch (error) {
     emit('notice', errorText(error))
   } finally {
-    busy.value = false
+    running.value = false
   }
 }
 
