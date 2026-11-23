@@ -227,8 +227,9 @@ impl Engine {
         task: &str,
         bytes: usize,
         next: &mut Instant,
+        position_current: impl Fn() -> bool,
     ) -> Result<bool> {
-        if !self.wait_background(Some(task)).await? {
+        if !self.wait_background(Some(task)).await? || !position_current() {
             return Ok(false);
         }
         let limit = self.policy.read().unwrap().bytes_per_second;
@@ -245,7 +246,7 @@ impl Engine {
                     .min(Duration::from_millis(50)),
             )
             .await;
-            if !self.wait_background(Some(task)).await? {
+            if !self.wait_background(Some(task)).await? || !position_current() {
                 return Ok(false);
             }
         }

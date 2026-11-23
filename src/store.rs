@@ -246,6 +246,14 @@ impl Store {
         Ok(())
     }
 
+    pub fn checkpoint(&self, id: &str, bytes: u64) -> Result<()> {
+        self.db.lock().unwrap().execute(
+            "UPDATE downloads SET downloaded=?2 WHERE id=?1 AND downloaded<?2 AND state NOT IN ('deleting','removed')",
+            params![id, bytes],
+        )?;
+        Ok(())
+    }
+
     pub fn transition(&self, id: &str, from: &str, to: &str) -> Result<bool> {
         Ok(self.db.lock().unwrap().execute(
             "UPDATE downloads SET state=?3,error=NULL,retry_at=NULL,attempts=CASE WHEN ?3='complete' THEN 0 ELSE attempts END,failure_kind=CASE WHEN ?3='complete' THEN NULL ELSE failure_kind END WHERE id=?1 AND state=?2",

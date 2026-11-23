@@ -64,7 +64,19 @@ async fn downloads_yield_only_to_origin_playback() {
     let automation = h.api("/automation", None).await;
     assert_eq!(automation["playing"], true);
     assert_eq!(automation["downloads_yielding"], false);
+    let before_playback = h.api("/stats", None).await["playback_totals"].clone();
 
+    // Leave an old response open while the player extends the partial file.
+    h.policy(json!({ "bytes_per_second": 1 })).await;
+    h.command(&id, "resume").await;
+    until("background request at the original offset", || async {
+        origin
+            .snapshot()
+            .calls
+            .iter()
+            .any(|call| call.path == path && call.range.as_deref() == Some("bytes=65536-"))
+    })
+    .await;
     origin.hold();
     let partial = h
         .client
@@ -76,9 +88,9 @@ async fn downloads_yield_only_to_origin_playback() {
         .unwrap();
     assert_eq!(partial.headers()["x-fn-media-cache"], "PARTIAL");
     assert_eq!(h.api("/automation", None).await["downloads_yielding"], true);
-    h.command(&id, "resume").await;
     let job = h.wait_job(&id, "downloading").await;
     assert_eq!(job["downloaded"], downloaded);
+    assert_eq!(job["bytes_per_second"], 0);
     assert_eq!(job["waiting_reason"], "playback");
 
     origin.release();
@@ -87,7 +99,55 @@ async fn downloads_yield_only_to_origin_playback() {
         &native_data(Mode::Task, "prefetched", 1)[..1048576]
     );
     assert_eq!(h.api("/automation", None).await["downloads_yielding"], true);
+    let playback_totals = h.api("/stats", None).await["playback_totals"].clone();
+    assert_eq!(
+        playback_totals["local_bytes"].as_u64().unwrap(),
+        before_playback["local_bytes"].as_u64().unwrap() + downloaded
+    );
+    assert_eq!(
+        playback_totals["upstream_bytes"].as_u64().unwrap(),
+        before_playback["upstream_bytes"].as_u64().unwrap() + 1048576 - downloaded
+    );
+    let job = h.job(&id).await;
+    assert_eq!(job["downloaded"], 1048576);
+    assert!(job["bytes_per_second"].as_u64().unwrap() > 0);
+    assert!(job["waiting_reason"].is_null());
+    let gap = h.get(&path, &token, Some("bytes=1048608-1048639")).await;
+    assert_eq!(
+        gap.body,
+        native_data(Mode::Task, "prefetched", 1)[1048608..1048640]
+    );
+    assert_eq!(h.job(&id).await["downloaded"], 1048576);
+
+    let adjacent = h.get(&path, &token, Some("bytes=1048576-1048607")).await;
+    assert_eq!(
+        adjacent.body,
+        native_data(Mode::Task, "prefetched", 1)[1048576..1048608]
+    );
+    assert_eq!(h.job(&id).await["downloaded"], 1048608);
+    let before_download = h.api("/stats", None).await;
+    h.policy(json!({ "bytes_per_second": 0 })).await;
     h.wait_job(&id, "complete").await;
+    let after_download = h.api("/stats", None).await;
+    assert_eq!(
+        after_download["playback_totals"],
+        before_download["playback_totals"]
+    );
+    assert!(
+        after_download["origin_bytes"].as_u64().unwrap()
+            > before_download["origin_bytes"].as_u64().unwrap()
+    );
+    assert_eq!(
+        fs::read(h.cache(&id, "bin")).unwrap(),
+        native_data(Mode::Task, "prefetched", 1)
+    );
+    assert!(
+        origin
+            .snapshot()
+            .calls
+            .iter()
+            .any(|call| { call.path == path && call.range.as_deref() == Some("bytes=1048608-") })
+    );
     let cached = cache_only(&h, &path, &token, "bytes=0-31").await;
     assert_eq!(cached.header("x-fn-media-cache"), "HIT");
     assert_eq!(

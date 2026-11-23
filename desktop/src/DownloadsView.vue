@@ -256,7 +256,7 @@ const downloadStatus = computed(() => {
   const policy = automation.value?.policy
   if (!policy) return ''
   const yielding = automation.value?.downloads_yielding ?? (automation.value?.playing && policy.pause_during_playback)
-  if (yielding) return '播放优先，下载暂缓'
+  if (yielding) return downloadSpeed(downloads.value) > 0 ? '播放优先，正在复用回源数据' : '播放优先，下载暂缓'
   return policy.bytes_per_second ? `限速 ${size(policy.bytes_per_second)}/s` : ''
 })
 

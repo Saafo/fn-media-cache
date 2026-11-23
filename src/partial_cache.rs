@@ -2,16 +2,82 @@
 use crate::{
     engine::Engine,
     protocol::{Range, Source, parse_content_range, parse_range, strong_etag, text_header},
-    transfers::LocalPrefix,
+    transfers::{DownloadSource, LocalPrefix},
 };
 use axum::{
-    body::Body,
+    body::{Body, Bytes},
     http::{HeaderMap, HeaderValue, Method, Response, StatusCode, header},
 };
 use futures_util::{StreamExt, TryStreamExt};
-use std::sync::{Arc, atomic::Ordering};
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use std::{
+    io::Write,
+    sync::{Arc, atomic::Ordering},
+};
+use tokio::{
+    io::{AsyncReadExt, AsyncSeekExt},
+    sync::OwnedRwLockReadGuard,
+};
 use tokio_util::io::ReaderStream;
+
+struct PlaybackAppend {
+    engine: Arc<Engine>,
+    file_guard: Arc<OwnedRwLockReadGuard<()>>,
+    id: String,
+    total: u64,
+    check_capacity: bool,
+}
+
+impl PlaybackAppend {
+    async fn write(&mut self, offset: u64, chunk: Bytes) -> bool {
+        let engine = self.engine.clone();
+        let id = self.id.clone();
+        let total = self.total;
+        let check_capacity = self.check_capacity;
+        let file_guard = self.file_guard.clone();
+        let append = engine.transfers.file_append(&id);
+        let append_guard = append.writer.clone().lock_owned().await;
+        // Keep both guards until the write finishes, even if the client disconnects.
+        let saved = tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
+            let (_file_guard, _append_guard) = (file_guard, append_guard);
+            if engine.shutdown.is_cancelled()
+                || engine
+                    .store
+                    .get(&id)?
+                    .is_none_or(|item| item.state != "downloading")
+            {
+                return Ok(false);
+            }
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(engine.store.file(&id, true))?;
+            let length = file.metadata()?.len();
+            if offset > length {
+                return Ok(false);
+            }
+            if check_capacity {
+                engine.check_download_capacity(&id, total, length)?;
+            }
+            let skip = length - offset;
+            if skip < chunk.len() as u64 {
+                append.playback_write();
+                let bytes = &chunk[skip as usize..];
+                file.write_all(bytes)?;
+                engine.store.checkpoint(&id, offset + chunk.len() as u64)?;
+                engine
+                    .transfers
+                    .download_bytes(&id, bytes.len() as u64, DownloadSource::Playback);
+            }
+            Ok(true)
+        })
+        .await;
+        if matches!(saved, Ok(Ok(true))) {
+            self.check_capacity = false;
+            true
+        } else {
+            false
+        }
+    }
+}
 
 pub async fn cached_prefix(
     engine: &Arc<Engine>,
@@ -35,7 +101,7 @@ pub async fn cached_prefix(
     if matches!(item.state.as_str(), "complete" | "removed" | "deleting") || item.downloaded == 0 {
         return None;
     }
-    let gate = engine.transfers.file_gate(&item.id).read_owned().await;
+    let gate = Arc::new(engine.transfers.file_gate(&item.id).read_owned().await);
     // Re-read after waiting for a writer to publish its new generation.
     let item = engine.store.get(&item.id).ok()??;
     if matches!(item.state.as_str(), "complete" | "removed" | "deleting") {
@@ -57,12 +123,15 @@ pub async fn cached_prefix(
         Range::Partial(start, end) => (start, end, StatusCode::PARTIAL_CONTENT),
         _ => return None,
     };
-    if start >= available {
+    if start > available
+        || (start == available
+            && (*method == Method::HEAD || available == 0 || item.state != "downloading"))
+    {
         return None;
     }
-    let local_end = end.min(available - 1);
-    let local_length = local_end - start + 1;
-    let missing = method != Method::HEAD && local_end < end;
+    let tail_start = (end + 1).min(available);
+    let local_length = tail_start - start;
+    let missing = method != Method::HEAD && tail_start <= end;
     if missing
         && incoming
             .get("x-fn-media-cache-only")
@@ -76,7 +145,7 @@ pub async fn cached_prefix(
             .client
             .get(source.url().ok()?)
             .headers(source.request_headers().ok()?)
-            .header(header::RANGE, format!("bytes={}-{}", local_end + 1, end));
+            .header(header::RANGE, format!("bytes={tail_start}-{end}"));
         if item.file_version.is_none()
             && let Some(validator) = strong_etag(&item.etag).or(item.last_modified.as_deref())
         {
@@ -85,10 +154,10 @@ pub async fn cached_prefix(
         let tail = request.send().await.ok()?;
         if tail.status() != StatusCode::PARTIAL_CONTENT
             || text_header(tail.headers(), "content-range").and_then(|v| parse_content_range(&v))
-                != Some((local_end + 1, end, total))
+                != Some((tail_start, end, total))
             || tail
                 .content_length()
-                .is_some_and(|length| length != end - local_end)
+                .is_some_and(|length| length != end + 1 - tail_start)
             || text_header(tail.headers(), "content-encoding").is_some_and(|v| v != "identity")
         {
             return None;
@@ -137,19 +206,27 @@ pub async fn cached_prefix(
     );
     headers.insert(
         "x-fn-media-cache",
-        HeaderValue::from_static(if missing { "PARTIAL" } else { "HIT" }),
+        HeaderValue::from_static(match (local_length, missing) {
+            (0, _) => "MISS",
+            (_, true) => "PARTIAL",
+            (_, false) => "HIT",
+        }),
     );
-    headers.insert(
-        "x-fn-media-cache-kind",
-        HeaderValue::from_static("partial-file"),
-    );
+    if local_length > 0 {
+        headers.insert(
+            "x-fn-media-cache-kind",
+            HeaderValue::from_static("partial-file"),
+        );
+    }
     if status == StatusCode::PARTIAL_CONTENT {
         headers.insert(
             header::CONTENT_RANGE,
             HeaderValue::from_str(&format!("bytes {start}-{end}/{total}")).ok()?,
         );
     }
-    response.extensions_mut().insert(LocalPrefix(local_length));
+    if local_length > 0 {
+        response.extensions_mut().insert(LocalPrefix(local_length));
+    }
     if method != Method::HEAD {
         file.seek(std::io::SeekFrom::Start(start)).await.ok()?;
         let state = engine.clone();
@@ -161,35 +238,48 @@ pub async fn cached_prefix(
             chunk
         });
         let state = engine.clone();
-        let remote = futures_util::stream::iter(tail)
-            .flat_map(move |response| {
-                futures_util::stream::try_unfold(
-                    (Box::pin(response.bytes_stream()), end - local_end),
-                    |(mut stream, remaining)| async move {
-                        if remaining == 0 {
-                            return Ok(None);
-                        }
-                        let chunk = stream
-                            .next()
-                            .await
-                            .ok_or_else(|| {
-                                std::io::Error::new(
-                                    std::io::ErrorKind::UnexpectedEof,
-                                    "upstream suffix ended early",
-                                )
-                            })?
-                            .map_err(std::io::Error::other)?;
-                        if chunk.len() as u64 > remaining {
-                            return Err(std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                "upstream suffix exceeded its range",
-                            ));
-                        }
-                        let remaining = remaining - chunk.len() as u64;
-                        Ok(Some((chunk, (stream, remaining))))
-                    },
-                )
-            })
+        let remote = tail.map(|response| {
+            let append = PlaybackAppend {
+                engine: engine.clone(),
+                file_guard: gate.clone(),
+                id: item.id,
+                total,
+                check_capacity: true,
+            };
+            futures_util::stream::try_unfold(
+                (Box::pin(response.bytes_stream()), tail_start, Some(append)),
+                move |(mut stream, offset, mut append)| async move {
+                    if offset > end {
+                        return Ok(None);
+                    }
+                    let chunk = stream
+                        .next()
+                        .await
+                        .ok_or_else(|| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::UnexpectedEof,
+                                "upstream suffix ended early",
+                            )
+                        })?
+                        .map_err(std::io::Error::other)?;
+                    if chunk.len() as u64 > end + 1 - offset {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "upstream suffix exceeded its range",
+                        ));
+                    }
+                    if let Some(cache) = &mut append
+                        && !cache.write(offset, chunk.clone()).await
+                    {
+                        append = None;
+                    }
+                    let offset = offset + chunk.len() as u64;
+                    Ok(Some((chunk, (stream, offset, append))))
+                },
+            )
+        });
+        let remote = futures_util::stream::iter(remote)
+            .flatten()
             .map_ok(move |chunk| {
                 state
                     .counters

@@ -75,6 +75,7 @@ export interface Stats {
   cache_bytes: number
   origin_bytes: number
   external_redirects: number
+  playback_totals?: { local_bytes: number; upstream_bytes: number }
   playback: {
     id: string
     download_id: string | null

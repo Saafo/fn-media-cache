@@ -22,6 +22,7 @@ use crate::{
     routes::{RouteFailure, Routes, transfer_error},
     scheduler::{PlaybackActivity, Policy},
     store::{Download, Store},
+    transfers::DownloadSource,
 };
 
 #[derive(Clone, Serialize)]
@@ -88,6 +89,11 @@ impl std::fmt::Display for CapacityError {
     }
 }
 impl std::error::Error for CapacityError {}
+
+enum DownloadAttempt {
+    Done,
+    Reopen,
+}
 
 impl Engine {
     pub fn new(config: Config, store: Store, token: String) -> Result<Arc<Self>> {
@@ -299,7 +305,7 @@ impl Engine {
                     if let Err(error) = self.download(&mut item).await {
                         // All messages in this path are sanitized; never log a request URL/header.
                         let message = error.to_string();
-                        let _ = self.store.progress(&item);
+                        let _ = self.store.checkpoint(&item.id, item.downloaded);
                         if self
                             .store
                             .get(&item.id)
@@ -369,11 +375,21 @@ impl Engine {
         {
             crate::event!("download {} route_attempt={}", &item.id[..12], index + 1);
             let source = route.source(&item.source);
-            match self
-                .download_from(item, &source, route.expected_version.as_deref())
-                .await
-            {
-                Ok(()) => return Ok(()),
+            let result = loop {
+                match self
+                    .download_from(item, &source, route.expected_version.as_deref())
+                    .await
+                {
+                    Ok(DownloadAttempt::Reopen) => {
+                        if !self.wait_background(Some(&item.id)).await? {
+                            return self.interrupt(item);
+                        }
+                    }
+                    result => break result,
+                }
+            };
+            match result {
+                Ok(_) => return Ok(()),
                 Err(error) => {
                     let retry_route = error.is::<RouteFailure>()
                         || error.is::<crate::recovery::Retryable>()
@@ -400,7 +416,7 @@ impl Engine {
         item: &mut Download,
         source: &Source,
         expected_version: Option<&str>,
-    ) -> Result<()> {
+    ) -> Result<DownloadAttempt> {
         let gate = self.transfers.file_gate(&item.id);
         let exclusive = gate.clone().write_owned().await;
         if self
@@ -408,7 +424,7 @@ impl Engine {
             .get(&item.id)?
             .is_none_or(|row| row.state != "downloading")
         {
-            return self.interrupt(item);
+            return self.interrupt(item).map(|()| DownloadAttempt::Done);
         }
         let partial = self.store.file(&item.id, true);
         let complete = self.store.file(&item.id, false);
@@ -421,7 +437,7 @@ impl Engine {
             item.downloaded = item.total.unwrap();
             self.store.progress(item)?;
             self.store.transition(&item.id, "downloading", "complete")?;
-            return Ok(());
+            return Ok(DownloadAttempt::Done);
         }
         item.downloaded = std::fs::metadata(&partial).map(|m| m.len()).unwrap_or(0);
         let native = if fntv::media_guid(source).is_some() {
@@ -463,7 +479,7 @@ impl Engine {
             tokio::fs::rename(&partial, &complete).await?;
             self.store.progress(item)?;
             self.store.transition(&item.id, "downloading", "complete")?;
-            return Ok(());
+            return Ok(DownloadAttempt::Done);
         }
         if item.total.is_some_and(|size| resume_at >= size) {
             resume_at = 0;
@@ -479,7 +495,7 @@ impl Engine {
             }
         }
         let response = tokio::select! {
-            _ = self.shutdown.cancelled() => { return self.interrupt(item); },
+            _ = self.shutdown.cancelled() => { return self.interrupt(item).map(|()| DownloadAttempt::Done); },
             result = request.send() => result.map_err(|_| crate::recovery::Retryable("upstream request failed"))?,
         };
         if response.status().is_redirection() {
@@ -539,17 +555,9 @@ impl Engine {
                 "upstream has no usable ETag or Last-Modified validator",
             ));
         }
-        let occupied = self.store.occupied_except(&item.id)?;
         item.total = Some(total);
         self.store.progress(item)?;
-        if occupied.saturating_add(total) > self.cache_limit() {
-            bail!(CapacityError);
-        }
-        let needed = total.saturating_sub(if append { resume_at } else { 0 });
-        if fs2::available_space(&self.config.data_dir)? < needed.saturating_add(self.disk_reserve())
-        {
-            bail!(CapacityError);
-        }
+        self.check_download_capacity(&item.id, total, if append { resume_at } else { 0 })?;
         let mut file = tokio::fs::OpenOptions::new()
             .create(true)
             .write(true)
@@ -567,8 +575,10 @@ impl Engine {
         item.content_type = text_header(response.headers(), "content-type");
         item.file_version = native.as_ref().map(|version| version.fingerprint.clone());
         self.store.progress(item)?;
+        let append = self.transfers.file_append(&item.id);
+        let revision = append.revision();
+        let position_current = || append.revision() == revision;
         let growing = tokio::sync::OwnedRwLockWriteGuard::downgrade(exclusive);
-        self.transfers.download_progress(&item.id, item.downloaded);
         let _download = self.power.download();
         let mut stream = response.bytes_stream();
         let mut saved_at = item.downloaded;
@@ -577,23 +587,29 @@ impl Engine {
         loop {
             if !self.wait_background(Some(&item.id)).await? {
                 file.sync_data().await?;
-                return self.interrupt(item);
+                return self.interrupt(item).map(|()| DownloadAttempt::Done);
+            }
+            if !position_current() {
+                return Ok(DownloadAttempt::Reopen);
             }
             let chunk = tokio::select! {
                 _ = self.shutdown.cancelled() => {
                     file.sync_data().await?;
-                    return self.interrupt(item);
+                    return self.interrupt(item).map(|()| DownloadAttempt::Done);
                 },
                 next = stream.next() => next,
                 _ = tokio::time::sleep(Duration::from_millis(250)) => {
                     if self.store.get(&item.id)?.is_none_or(|current| current.state != "downloading") {
                         file.sync_data().await?;
-                        self.store.progress(item)?;
-                        return Ok(());
+                        self.store.checkpoint(&item.id, item.downloaded)?;
+                        return Ok(DownloadAttempt::Done);
                     }
                     continue;
                 },
             };
+            if !position_current() {
+                return Ok(DownloadAttempt::Reopen);
+            }
             let Some(chunk) = chunk else {
                 break;
             };
@@ -606,8 +622,8 @@ impl Engine {
                 .is_none_or(|current| current.state != "downloading")
             {
                 file.sync_data().await?;
-                self.store.progress(item)?;
-                return Ok(());
+                self.store.checkpoint(&item.id, item.downloaded)?;
+                return Ok(DownloadAttempt::Done);
             }
             if item.downloaded.saturating_add(chunk.len() as u64) > total {
                 return Err(transfer_error("upstream sent more bytes than declared"));
@@ -615,22 +631,35 @@ impl Engine {
             // Bounded writes keep rate measurements, cancellation and visible prefixes responsive.
             for piece in chunk.chunks(64 * 1024) {
                 if !self
-                    .pace_download(&item.id, piece.len(), &mut next_chunk)
+                    .pace_download(&item.id, piece.len(), &mut next_chunk, position_current)
                     .await?
                 {
+                    if !position_current() {
+                        return Ok(DownloadAttempt::Reopen);
+                    }
                     file.sync_data().await?;
-                    return self.interrupt(item);
+                    return self.interrupt(item).map(|()| DownloadAttempt::Done);
+                }
+                let _append = append.writer.lock().await;
+                // Playback may have advanced the file while this response waited to write.
+                if !position_current() {
+                    return Ok(DownloadAttempt::Reopen);
                 }
                 file.write_all(piece).await.context("cache write failed")?;
+                file.flush().await.context("cache write failed")?;
                 item.downloaded += piece.len() as u64;
-                self.transfers.download_progress(&item.id, item.downloaded);
+                self.transfers.download_bytes(
+                    &item.id,
+                    piece.len() as u64,
+                    DownloadSource::Background,
+                );
                 self.counters
                     .origin_bytes
                     .fetch_add(piece.len() as u64, Ordering::Relaxed);
                 if item.downloaded - saved_at >= 1024 * 1024
                     || saved_time.elapsed() >= Duration::from_millis(500)
                 {
-                    self.store.progress(item)?;
+                    self.store.checkpoint(&item.id, item.downloaded)?;
                     saved_at = item.downloaded;
                     saved_time = std::time::Instant::now();
                 }
@@ -658,7 +687,7 @@ impl Engine {
             .get(&item.id)?
             .is_none_or(|row| row.state != "downloading")
         {
-            return self.interrupt(item);
+            return self.interrupt(item).map(|()| DownloadAttempt::Done);
         }
         tokio::fs::rename(&partial, &complete)
             .await
@@ -667,11 +696,29 @@ impl Engine {
         if self.store.transition(&item.id, "downloading", "complete")? {
             crate::event!("download {} complete: {} bytes", &item.id[..12], total);
         }
+        Ok(DownloadAttempt::Done)
+    }
+
+    pub(crate) fn check_download_capacity(
+        &self,
+        id: &str,
+        total: u64,
+        existing: u64,
+    ) -> Result<()> {
+        let occupied = self.store.occupied_except(id)?;
+        let needed = total
+            .saturating_sub(existing)
+            .saturating_add(self.disk_reserve());
+        if occupied.saturating_add(total) > self.cache_limit()
+            || fs2::available_space(&self.config.data_dir)? < needed
+        {
+            bail!(CapacityError);
+        }
         Ok(())
     }
 
     fn interrupt(&self, item: &Download) -> Result<()> {
-        self.store.progress(item)?;
+        self.store.checkpoint(&item.id, item.downloaded)?;
         if self
             .store
             .get(&item.id)?

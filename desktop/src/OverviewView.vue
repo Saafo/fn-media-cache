@@ -18,20 +18,23 @@ const requestTime = new Intl.DateTimeFormat(undefined, {
 let reading = false
 let generation = 0
 
-const metrics = computed(() => {
-  const stats = props.snapshot?.stats
-  return [
-    ['代理请求', stats?.requests ?? 0], ['本地供流', size(stats?.cache_bytes)], ['回源读取', size(stats?.origin_bytes)],
-  ]
-})
 const playback = computed(() => props.snapshot?.stats.playback ?? [])
 const media = computed(() => props.snapshot?.automation.managed ?? [])
 const rangePrefix = '/v/api/v1/media/range/'
-const readTotals = computed(() => playback.value.reduce((totals, reading) => {
-  totals.local += reading.local_bytes
-  totals.origin += reading.upstream_bytes
-  return totals
-}, { local: 0, origin: 0 }))
+const readTotals = computed(() => {
+  const totals = props.snapshot?.stats.playback_totals
+  if (totals) return { local: totals.local_bytes, origin: totals.upstream_bytes }
+  return playback.value.reduce((totals, reading) => {
+    totals.local += reading.local_bytes
+    totals.origin += reading.upstream_bytes
+    return totals
+  }, { local: 0, origin: 0 })
+})
+const metrics = computed(() => [
+  ['代理请求', props.snapshot?.stats.requests ?? 0],
+  ['本地供流', size(readTotals.value.local)],
+  ['回源读取', size(readTotals.value.origin)],
+])
 const bytesRead = computed(() => readTotals.value.local + readTotals.value.origin)
 const localShare = computed(() => bytesRead.value ? 100 * readTotals.value.local / bytesRead.value : 0)
 const downloadRate = computed(() => {

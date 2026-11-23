@@ -165,10 +165,12 @@ async fn refresh_sessions(State(engine): State<Arc<Engine>>) -> ApiResult<serde_
 
 async fn stats(State(engine): State<Arc<Engine>>) -> Json<serde_json::Value> {
     let c = &engine.counters;
+    let (playback_totals, playback) = engine.transfers.playback();
     Json(
         json!({ "requests": c.requests.load(Ordering::Relaxed), "cache_hits": c.cache_hits.load(Ordering::Relaxed),
         "origin_bytes": c.origin_bytes.load(Ordering::Relaxed), "cache_bytes": c.cache_bytes.load(Ordering::Relaxed),
-        "external_redirects": c.external_redirects.load(Ordering::Relaxed), "max_cache_bytes": engine.cache_limit(), "playback": engine.transfers.playback() }),
+        "external_redirects": c.external_redirects.load(Ordering::Relaxed), "max_cache_bytes": engine.cache_limit(),
+        "playback_totals": playback_totals, "playback": playback }),
     )
 }
 
@@ -857,7 +859,13 @@ async fn proxy_inner(engine: Arc<Engine>, request: Request<Body>, client_ip: IpA
             crate::partial_cache::cached_prefix(&engine, &source, &parts.method, &parts.headers)
                 .await
     {
-        engine.counters.cache_hits.fetch_add(1, Ordering::Relaxed);
+        if response
+            .extensions()
+            .get::<crate::transfers::LocalPrefix>()
+            .is_some()
+        {
+            engine.counters.cache_hits.fetch_add(1, Ordering::Relaxed);
+        }
         if !private && !engine.policy.read().unwrap().incognito {
             crate::event!(
                 "request {} {} partial-cache={}",
