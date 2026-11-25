@@ -53,7 +53,7 @@ impl Default for Policy {
             local_history: false,
             prefetch_count: 2,
             prefetch_after_seconds: 60,
-            bytes_per_second: 10 * 1024 * 1024,
+            bytes_per_second: 0,
             pause_during_playback: true,
             prevent_idle_sleep: false,
             cleanup_enabled: true,
