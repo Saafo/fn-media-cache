@@ -21,6 +21,7 @@ const items = shallowRef<MediaItem[]>([])
 const selected = ref(new Set<string>())
 const seasonEpisodes = ref(new Map<string, string[]>())
 const selecting = ref(false)
+const resultsScroll = ref<HTMLElement>()
 const resultsTable = ref<HTMLTableElement>()
 let selectionAnchor = ''
 const hasMore = ref(false)
@@ -132,6 +133,7 @@ async function load(next: CatalogLocation, nextHistory = history.value) {
     location.value = next
     if (next.mode === 'search') query.value = next.value
     items.value = result.items
+    resultsScroll.value?.scrollTo(0, 0)
     hasMore.value = result.has_more
     selectionAnchor = ''
     if (next.kind === 'Season' && !result.has_more) {
@@ -376,7 +378,7 @@ async function enqueue() {
           </nav>
         </header>
         <p v-if="status" class="empty" role="status">{{ status }}</p>
-        <div v-if="items.length" class="catalog-scroll">
+        <div v-if="items.length" ref="resultsScroll" class="table-scroll">
           <table ref="resultsTable" aria-label="媒体库列表" tabindex="0" @keydown="listKeys">
             <thead><tr>
               <th scope="col" class="catalog-select">
@@ -411,7 +413,7 @@ async function enqueue() {
         </div>
         <div
           v-if="selectableRows.length || selected.size || selecting || selectionStatus || location.page > 1 || hasMore"
-          class="toolbar catalog-footer" :class="{ 'selection-bar': selected.size || selectionStatus }"
+          class="toolbar catalog-footer"
         >
           <button v-if="location.page > 1" type="button" :disabled="busy" @click="load({ ...location, page: location.page - 1 })">上一页</button>
           <small v-if="location.page > 1 || hasMore">第 {{ location.page }} 页</small>

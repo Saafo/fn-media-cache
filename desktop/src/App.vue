@@ -48,8 +48,9 @@ async function choose(next: Page) {
   report()
   await nextTick()
   if (next !== page.value) return
-  window.scrollTo(0, 0)
-  main.value?.querySelector<HTMLElement>(`[data-view="${next}"] h1`)?.focus({ preventScroll: true })
+  const view = main.value?.querySelector<HTMLElement>(`[data-view="${next}"]`)
+  view?.scrollTo(0, 0)
+  view?.querySelector('h1')?.focus({ preventScroll: true })
 }
 
 function invalidate() {
@@ -167,6 +168,7 @@ onUnmounted(() => {
         @refresh="refresh(true)" @notice="report"
       />
       <OverviewView
+        class="view-scroll"
         v-show="page === 'overview'" :visible="page === 'overview'" :snapshot="snapshot"
         :can-open-logs="isDesktop && Boolean(desktop?.configured)" @refresh="refresh(true)" @notice="report"
         @show-tasks="choose('tasks')"
@@ -180,6 +182,7 @@ onUnmounted(() => {
         <p v-if="isDesktop" class="panel hint">连接后台后可浏览媒体库。</p>
       </section>
       <SettingsView
+        class="view-scroll"
         v-show="page === 'settings'" :desktop="desktop" :snapshot="snapshot"
         @refresh="refresh(true)" @server-saved="applyDesktop($event, true)"
       />

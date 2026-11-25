@@ -333,72 +333,74 @@ function badge(job: Download) {
             <button type="button" :disabled="batchBusy" @click="picked.clear()">清空已选</button>
           </template>
         </div>
-        <table class="download-table" aria-label="下载任务">
-          <thead><tr>
-            <th scope="col" class="task-select">
-              <input
-                v-if="tasks.length" type="checkbox" aria-label="全选当前筛选结果"
-                :checked="allPicked" :indeterminate="!allPicked && pickedTasks.length > 0" :disabled="selectionLocked"
-                @change="pickTasks(tasks, $event)"
-              >
-            </th>
-            <th scope="col">影片 / 剧集</th><th scope="col">状态</th><th scope="col">缓存量</th>
-            <th scope="col">速度 / 剩余</th><th scope="col" class="align-end">操作</th>
-          </tr></thead>
-          <tbody id="downloads">
-            <template v-for="row in groups" :key="'episodes' in row ? row.key : row.id">
-              <template v-if="'episodes' in row">
-                <tr class="task-series">
-                  <td class="task-select">
-                    <input
-                      type="checkbox" :aria-label="`选择 ${groupTitle(row)}`" :disabled="selectionLocked"
-                      v-bind="episodeSelection(row.episodes)"
-                      @change="pickTasks(row.episodes.map(({ job }) => job), $event)"
-                    >
-                  </td>
-                  <th scope="row">
-                    <button type="button" class="task-label" :aria-expanded="expanded.has(row.key)" @click="toggleSeries(row.key)">
-                      <span aria-hidden="true">{{ expanded.has(row.key) ? '▾' : '▸' }}</span>
-                      {{ groupTitle(row) }}
-                    </button>
-                  </th>
-                  <td colspan="4" class="hint">{{ groupSummary(row) }}</td>
-                </tr>
-                <template v-if="expanded.has(row.key)">
-                  <template v-for="season in seasons(row)" :key="season.number">
-                    <tr class="task-season">
-                      <td class="task-select">
-                        <input
-                          type="checkbox" :aria-label="`选择 ${groupTitle(row)} ${seasonTitle(season.number)}`"
-                          :disabled="selectionLocked" v-bind="episodeSelection(season.episodes)"
-                          @change="pickTasks(season.episodes.map(({ job }) => job), $event)"
-                        >
-                      </td>
-                      <th colspan="5" scope="row">{{ seasonTitle(season.number) }}</th>
-                    </tr>
-                    <DownloadRow
-                      v-for="{ job, entry } in season.episodes" :key="job.id"
-                      :job="job" :managed="managed.get(job.id) ?? []" :episode-item="entry.item"
-                      :series-title="groupTitle(row)" :notes="notes(job)" :description="describe(job)" :transfer="transfer(job)"
-                      :badge="badge(job)" :position="reorderIndex.get(job.id) ?? -1" :queue-length="reorderable.length"
-                      :selected="picked.has(job.id)" :batch-busy="selectionLocked" @select="pickTask(job.id, $event)"
-                      :open-menu="openMenu" @open="openMenu = $event" @close="closeMenu($event)"
-                      @refresh="emit('refresh')" @notice="emit('notice', $event)"
-                    />
+        <div class="table-scroll" tabindex="0" role="region" aria-label="下载任务列表">
+          <table class="download-table" aria-label="下载任务">
+            <thead><tr>
+              <th scope="col" class="task-select">
+                <input
+                  v-if="tasks.length" type="checkbox" aria-label="全选当前筛选结果"
+                  :checked="allPicked" :indeterminate="!allPicked && pickedTasks.length > 0" :disabled="selectionLocked"
+                  @change="pickTasks(tasks, $event)"
+                >
+              </th>
+              <th scope="col">影片 / 剧集</th><th scope="col">状态</th><th scope="col">缓存量</th>
+              <th scope="col">速度 / 剩余</th><th scope="col" class="align-end">操作</th>
+            </tr></thead>
+            <tbody id="downloads">
+              <template v-for="row in groups" :key="'episodes' in row ? row.key : row.id">
+                <template v-if="'episodes' in row">
+                  <tr class="task-series">
+                    <td class="task-select">
+                      <input
+                        type="checkbox" :aria-label="`选择 ${groupTitle(row)}`" :disabled="selectionLocked"
+                        v-bind="episodeSelection(row.episodes)"
+                        @change="pickTasks(row.episodes.map(({ job }) => job), $event)"
+                      >
+                    </td>
+                    <th scope="row">
+                      <button type="button" class="task-label" :aria-expanded="expanded.has(row.key)" @click="toggleSeries(row.key)">
+                        <span aria-hidden="true">{{ expanded.has(row.key) ? '▾' : '▸' }}</span>
+                        {{ groupTitle(row) }}
+                      </button>
+                    </th>
+                    <td colspan="4" class="hint">{{ groupSummary(row) }}</td>
+                  </tr>
+                  <template v-if="expanded.has(row.key)">
+                    <template v-for="season in seasons(row)" :key="season.number">
+                      <tr class="task-season">
+                        <td class="task-select">
+                          <input
+                            type="checkbox" :aria-label="`选择 ${groupTitle(row)} ${seasonTitle(season.number)}`"
+                            :disabled="selectionLocked" v-bind="episodeSelection(season.episodes)"
+                            @change="pickTasks(season.episodes.map(({ job }) => job), $event)"
+                          >
+                        </td>
+                        <th colspan="5" scope="row">{{ seasonTitle(season.number) }}</th>
+                      </tr>
+                      <DownloadRow
+                        v-for="{ job, entry } in season.episodes" :key="job.id"
+                        :job="job" :managed="managed.get(job.id) ?? []" :episode-item="entry.item"
+                        :series-title="groupTitle(row)" :notes="notes(job)" :description="describe(job)" :transfer="transfer(job)"
+                        :badge="badge(job)" :position="reorderIndex.get(job.id) ?? -1" :queue-length="reorderable.length"
+                        :selected="picked.has(job.id)" :batch-busy="selectionLocked" @select="pickTask(job.id, $event)"
+                        :open-menu="openMenu" @open="openMenu = $event" @close="closeMenu($event)"
+                        @refresh="emit('refresh')" @notice="emit('notice', $event)"
+                      />
+                    </template>
                   </template>
                 </template>
+                <DownloadRow
+                  v-else :job="row" :managed="managed.get(row.id) ?? []"
+                  :notes="notes(row)" :description="describe(row)" :transfer="transfer(row)" :badge="badge(row)"
+                  :position="reorderIndex.get(row.id) ?? -1" :queue-length="reorderable.length"
+                  :selected="picked.has(row.id)" :batch-busy="selectionLocked" @select="pickTask(row.id, $event)"
+                  :open-menu="openMenu" @open="openMenu = $event" @close="closeMenu($event)"
+                  @refresh="emit('refresh')" @notice="emit('notice', $event)"
+                />
               </template>
-              <DownloadRow
-                v-else :job="row" :managed="managed.get(row.id) ?? []"
-                :notes="notes(row)" :description="describe(row)" :transfer="transfer(row)" :badge="badge(row)"
-                :position="reorderIndex.get(row.id) ?? -1" :queue-length="reorderable.length"
-                :selected="picked.has(row.id)" :batch-busy="selectionLocked" @select="pickTask(row.id, $event)"
-                :open-menu="openMenu" @open="openMenu = $event" @close="closeMenu($event)"
-                @refresh="emit('refresh')" @notice="emit('notice', $event)"
-              />
-            </template>
-          </tbody>
-        </table>
+            </tbody>
+          </table>
+        </div>
         <p v-if="!tasks.length" class="empty">{{ selected === 'all' ? '暂无下载任务。' : '此状态下没有任务。' }}</p>
       </div>
     </template>
