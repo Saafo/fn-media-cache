@@ -342,6 +342,9 @@ const ITEMS: &[(&str, &str, &str, u64, u64)] = &[
     ("three", "Episode", "season-one", 1, 3),
     ("four", "Episode", "season-two", 2, 1),
     ("special", "Episode", "specials", 0, 1),
+    ("other-show", "TV", "library", 0, 0),
+    ("other-season", "Season", "other-show", 1, 0),
+    ("other-one", "Episode", "other-season", 1, 1),
     ("alias-one", "Movie", "library", 0, 0),
     ("alias-two", "Movie", "library", 0, 0),
     ("space", "Movie", "library", 0, 0),
@@ -506,11 +509,15 @@ fn serve(
     } else if catalog && r.path.starts_with("/v/api/v1/item/") {
         item(r.path.rsplit('/').next().unwrap(), &s)
     } else if catalog && r.path.starts_with("/v/api/v1/season/list/") {
-        json!([
-            item("specials", &s),
-            item("season-two", &s),
-            item("season-one", &s)
-        ])
+        let parent = r.path.rsplit('/').next().unwrap();
+        Value::Array(
+            ITEMS
+                .iter()
+                .rev()
+                .filter(|i| i.1 == "Season" && i.2 == parent)
+                .map(|i| item(i.0, &s))
+                .collect(),
+        )
     } else if catalog && r.path.starts_with("/v/api/v1/episode/list/") {
         let parent = r.path.rsplit('/').next().unwrap();
         Value::Array(

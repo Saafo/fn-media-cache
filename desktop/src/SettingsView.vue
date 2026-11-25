@@ -10,6 +10,7 @@ const mode = ref<'sync' | 'local' | 'incognito'>('sync')
 const server = ref<ServerSettings>()
 const alternates = ref('')
 const policy = ref<Policy>()
+const retentionHours = ref<number | ''>('')
 const policyMessage = ref('')
 const serverMessage = ref('')
 const savingPolicy = ref(false)
@@ -17,7 +18,7 @@ const savingServer = ref(false)
 const savedPolicy = ref<Policy>()
 const savedServer = ref('')
 
-type NumericKey = Exclude<keyof Policy, 'incognito' | 'local_history' | 'auto_prefetch' | 'pause_during_playback' | 'prevent_idle_sleep' | 'cleanup_enabled' | 'prefetch_after_seconds'>
+type NumericKey = Exclude<keyof Policy, 'incognito' | 'local_history' | 'auto_prefetch' | 'pause_during_playback' | 'prevent_idle_sleep' | 'cleanup_enabled' | 'cleanup_previous_episodes' | 'prefetch_after_seconds' | 'retention_seconds'>
 type NumberField = [key: NumericKey, label: string, min: number, max: number | undefined, scale?: number]
 const downloadFields: NumberField[] = [
   ['bytes_per_second', '限速（MiB/s，0 为不限速）', 0, 1024, MiB],
@@ -27,7 +28,6 @@ const downloadFields: NumberField[] = [
 const cacheFields: NumberField[] = [
   ['cache_limit_bytes', '上限（GiB）', 0.01, undefined, GiB],
   ['reserved_disk_bytes', '磁盘预留（MiB）', 0, undefined, MiB],
-  ['retention_seconds', '看完后保留（小时）', 0, 8760, 3600],
 ]
 const advancedFields: NumberField[] = [
   ['scheduler_interval_seconds', '调度间隔（秒）', 1, 3600],
@@ -42,9 +42,16 @@ const advancedFields: NumberField[] = [
 ]
 const fields = [...downloadFields, ...cacheFields, ...advancedFields]
 const numbers = reactive<Partial<Record<NumericKey, string | number>>>({})
+const optionalRetention = computed(() => props.snapshot?.automation.optional_retention_supported === true)
 const policyPayload = computed(() => {
   if (!policy.value) return
-  const payload = { ...policy.value, incognito: mode.value === 'incognito', local_history: mode.value === 'local' }
+  const payload = {
+    ...policy.value,
+    incognito: mode.value === 'incognito',
+    local_history: mode.value === 'local',
+    cleanup_enabled: optionalRetention.value || policy.value.cleanup_enabled,
+    retention_seconds: retentionHours.value === '' ? null : Math.round(retentionHours.value * 3600),
+  }
   for (const [key, , , , scale = 1] of fields) payload[key] = Math.round(Number(numbers[key]) * scale)
   return payload
 })
@@ -92,7 +99,12 @@ watch(() => props.snapshot, snapshot => {
     return
   }
   const values = { ...automation.policy, cache_limit_bytes: automation.cache_limit_bytes }
+  if (optionalRetention.value && !values.cleanup_enabled) {
+    values.cleanup_previous_episodes = false
+    values.retention_seconds = null
+  }
   policy.value = values
+  retentionHours.value = values.retention_seconds === null ? '' : values.retention_seconds / 3600
   mode.value = values.incognito ? 'incognito' : values.local_history ? 'local' : 'sync'
   for (const [key, , , , scale = 1] of fields) numbers[key] = values[key] / scale
   savedPolicy.value = policyPayload.value
@@ -180,7 +192,7 @@ async function saveServer() {
         <label><span><input v-model="policy.pause_during_playback" type="checkbox" aria-describedby="playback-yield-note">播放回源时暂停下载</span></label>
         <label><span><input v-model="policy.auto_prefetch" type="checkbox">自动预取后续剧集</span></label>
         <label v-if="policy.prefetch_after_seconds !== undefined">
-          预取前播放时长（秒，0 为立即）
+          {{ policy.cleanup_previous_episodes === undefined ? '预取' : '预取与提前清理' }}前播放时长（秒，0 为立即）
           <input v-model.number="policy.prefetch_after_seconds" type="number" min="0" max="3600" step="1" required>
         </label>
         <label v-if="snapshot?.automation.prevent_idle_sleep_supported"><span><input v-model="policy.prevent_idle_sleep" type="checkbox">播放或下载时防止休眠</span></label>
@@ -192,8 +204,25 @@ async function saveServer() {
         <label v-for="[key, label, min, max] in cacheFields" :key="key">
           {{ label }}<input v-model.number="numbers[key]" type="number" :min="min" :max="max" step="any" required>
         </label>
-        <label><span><input v-model="policy.cleanup_enabled" type="checkbox">看完后自动清理</span></label>
+        <label v-if="policy.cleanup_previous_episodes !== undefined">
+          <span><input v-model="policy.cleanup_previous_episodes" type="checkbox" :disabled="(!optionalRetention && !policy.cleanup_enabled) || mode === 'incognito'" aria-describedby="episode-cleanup-note">看下一集时清理之前的集</span>
+        </label>
+        <label>
+          看完后保留（小时）
+          <input
+            v-model.number="retentionHours" type="number" min="0" max="8760" step="any"
+            :required="!optionalRetention" :placeholder="optionalRetention ? '留空则不定时清理' : undefined"
+            aria-describedby="retention-note"
+          >
+        </label>
       </div>
+      <p v-if="policy.cleanup_previous_episodes !== undefined" id="episode-cleanup-note" class="hint settings-note">
+        {{ snapshot?.automation.cross_season_cleanup_supported
+          ? '同一部剧的后续集播满设定时长后，清理之前各集的缓存，包括之前的季和跳过的集。'
+          : '同一季的后续集播满设定时长后，清理之前各集的缓存，包括跳过的集。' }}
+        默认 60 秒。
+      </p>
+      <p id="retention-note" class="hint settings-note">看完这一集就停下时，缓存会在保留期满后清理。关闭提前清理时，所有已看完的集都按这个时间保留。{{ optionalRetention ? '留空则不按时间清理。' : '' }}</p>
       <details>
         <summary>高级</summary>
         <div class="settings">

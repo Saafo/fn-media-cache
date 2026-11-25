@@ -33,6 +33,116 @@ async fn idle_sleep_preference_survives_other_policy_changes_and_restart() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn later_episode_playback_shares_the_prefetch_threshold_and_keeps_normal_retention() {
+    let origin = Origin::new(Mode::Catalog);
+    let mut h = Harness::new(std::slice::from_ref(&origin.url)).await;
+    h.login(TOKEN).await;
+    let jobs = h.queue(&["one", "two", "four"]).await;
+    let [first, second, other_season] = jobs.as_slice() else {
+        panic!("expected three downloads");
+    };
+    for id in &jobs {
+        h.wait_job(id, "complete").await;
+    }
+    assert!(h.managed("one").await["completed_at"].is_null());
+    h.retain("four", json!({ "completed": true })).await;
+    let policy = h
+        .policy(json!({
+            "auto_prefetch": true,
+            "prefetch_count": 1,
+            "prefetch_after_seconds": 1,
+            "scheduler_interval_seconds": 1
+        }))
+        .await;
+    assert_eq!(policy["cleanup_previous_episodes"], true);
+
+    h.progress_at("two", 500).await;
+    h.progress_at("two", 900).await;
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    h.progress_at("two", 900).await;
+    assert_eq!(h.job(first).await["state"], "complete");
+    assert!(
+        !h.api("/automation", None).await["managed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["item"]["guid"] == "three")
+    );
+
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    h.progress_at("two", 902).await;
+    h.wait_job_absent(first).await;
+    let third = h.managed("three").await["download_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    h.wait_job(&third, "complete").await;
+    assert_eq!(h.job(second).await["state"], "complete");
+    assert_eq!(h.job(other_season).await["state"], "complete");
+
+    h.policy(json!({ "auto_prefetch": false, "local_history": true, "retention_seconds": null }))
+        .await;
+    h.retain("two", json!({ "keep": true })).await;
+    h.progress_at("three", 0).await;
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    h.progress_at("three", 2).await;
+    until(
+        "later episode playback remembered in local history mode",
+        || async {
+            h.db()
+                .query_row(
+                    "SELECT MAX(episode_number) FROM episode_playback",
+                    [],
+                    |r| r.get::<_, Option<u64>>(0),
+                )
+                .unwrap()
+                == Some(3)
+        },
+    )
+    .await;
+    assert_eq!(h.job(second).await["state"], "complete");
+    h.restart(false).await;
+    h.retain("two", json!({ "keep": false })).await;
+    h.wait_job_absent(second).await;
+    assert_eq!(h.job(other_season).await["state"], "complete");
+
+    h.retain("three", json!({ "completed": true })).await;
+    h.backdate("three", 48 * 60 * 60 + 1).await;
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert_eq!(h.job(&third).await["state"], "complete");
+    h.policy(json!({ "retention_seconds": 48 * 60 * 60 })).await;
+    h.wait_job_absent(&third).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cleanup_follows_playback_across_verified_seasons_of_the_same_series() {
+    let origin = Origin::new(Mode::Catalog);
+    let h = Harness::new(std::slice::from_ref(&origin.url)).await;
+    h.login(TOKEN).await;
+    let jobs = h
+        .queue(&["one", "three", "four", "other-one", "special"])
+        .await;
+    let [first, third, next_season, other_series, special] = jobs.as_slice() else {
+        panic!("expected five downloads");
+    };
+    for id in &jobs {
+        h.wait_job(id, "complete").await;
+    }
+    h.policy(json!({ "prefetch_after_seconds": 1 })).await;
+
+    h.progress_at("four", 0).await;
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert_eq!(h.job(first).await["state"], "complete");
+    assert_eq!(h.job(third).await["state"], "complete");
+    h.progress_at("four", 2).await;
+    h.wait_job_absent(first).await;
+    h.wait_job_absent(third).await;
+    for id in [next_season, other_series, special] {
+        assert_eq!(h.job(id).await["state"], "complete");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn catalog_prefetch_and_cleanup() {
     let origin = Origin::new(Mode::Catalog);
     let mut h = Harness::new(std::slice::from_ref(&origin.url)).await;
@@ -41,7 +151,7 @@ async fn catalog_prefetch_and_cleanup() {
         200
     );
     h.policy(
-        json!({"bytes_per_second":0,"scheduler_interval_seconds":1,"playback_cooldown_seconds":0}),
+        json!({"bytes_per_second":0,"scheduler_interval_seconds":1,"playback_cooldown_seconds":0,"cleanup_previous_episodes":false}),
     )
     .await;
     assert_eq!(

@@ -45,7 +45,8 @@ export interface Policy {
   pause_during_playback: boolean
   prevent_idle_sleep: boolean
   cleanup_enabled: boolean
-  retention_seconds: number
+  cleanup_previous_episodes?: boolean
+  retention_seconds: number | null
   playback_cooldown_seconds: number
   reserved_disk_bytes: number
   cache_limit_bytes: number | null
@@ -66,6 +67,8 @@ export interface Automation {
   playing: boolean
   downloads_yielding?: boolean
   prevent_idle_sleep_supported?: boolean
+  cross_season_cleanup_supported?: boolean
+  optional_retention_supported?: boolean
   cache_limit_bytes: number
 }
 

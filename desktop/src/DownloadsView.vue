@@ -264,8 +264,8 @@ function notes(job: Download) {
   const policy = automation.value?.policy
   return (managed.value.get(job.id) ?? []).flatMap(entry => {
     if (entry.keep) return ['已保留']
-    if (!entry.completed_at || !policy?.cleanup_enabled || policy.local_history) return []
-    return [`清理时间 ${new Date((entry.completed_at + policy.retention_seconds) * 1000).toLocaleString()}`]
+    if (!entry.completed_at || !policy?.cleanup_enabled || policy.local_history || policy.retention_seconds === null) return []
+    return [`保留期至 ${new Date((entry.completed_at + policy.retention_seconds) * 1000).toLocaleString()}`]
   }).join(' · ')
 }
 

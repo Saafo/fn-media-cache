@@ -31,7 +31,8 @@ pub struct Policy {
     pub pause_during_playback: bool,
     pub prevent_idle_sleep: bool,
     pub cleanup_enabled: bool,
-    pub retention_seconds: u64,
+    pub cleanup_previous_episodes: bool,
+    pub retention_seconds: Option<u64>,
     pub playback_cooldown_seconds: u64,
     pub reserved_disk_bytes: u64,
     pub cache_limit_bytes: Option<u64>,
@@ -57,7 +58,8 @@ impl Default for Policy {
             pause_during_playback: true,
             prevent_idle_sleep: false,
             cleanup_enabled: true,
-            retention_seconds: 48 * 60 * 60,
+            cleanup_previous_episodes: true,
+            retention_seconds: Some(48 * 60 * 60),
             playback_cooldown_seconds: 2,
             reserved_disk_bytes: 64 * 1024 * 1024,
             cache_limit_bytes: None,
@@ -78,6 +80,19 @@ impl Policy {
         !self.incognito && !self.local_history
     }
 
+    pub fn accelerates_episode_cleanup(&self) -> bool {
+        self.cleanup_enabled && self.cleanup_previous_episodes && !self.incognito
+    }
+
+    pub fn retention_cutoff(&self, at: i64) -> Option<i64> {
+        self.retention_seconds
+            .map(|seconds| at.saturating_sub(seconds as i64))
+    }
+
+    pub fn tracks_watch_time(&self) -> bool {
+        (self.auto_prefetch && !self.incognito) || self.accelerates_episode_cleanup()
+    }
+
     pub fn validate(&self) -> Result<()> {
         if self.incognito && self.local_history {
             bail!("local history and incognito are mutually exclusive");
@@ -85,7 +100,9 @@ impl Policy {
         if !(1..=20).contains(&self.prefetch_count)
             || self.prefetch_after_seconds > 3600
             || self.bytes_per_second > 1024 * 1024 * 1024
-            || self.retention_seconds > 365 * 86400
+            || self
+                .retention_seconds
+                .is_some_and(|seconds| seconds > 365 * 86400)
             || self.playback_cooldown_seconds > 3600
             || self.reserved_disk_bytes > i64::MAX as u64
             || self
@@ -325,7 +342,7 @@ impl Engine {
                 Ok(item) => item,
                 Err(_) => continue,
             };
-            {
+            let prefetch = {
                 let active = self.policy.read().unwrap();
                 if active.incognito || active.local_history != policy.local_history {
                     return Ok(());
@@ -338,17 +355,19 @@ impl Engine {
                         now(),
                     )?;
                 }
-            }
-            let eligible = {
-                let active = self.policy.read().unwrap();
-                self.prefetch_watch.lock().unwrap().eligible(
-                    &work.session_id,
-                    &work.item_guid,
-                    &active,
-                    Instant::now(),
-                )
+                let threshold_reached = active.tracks_watch_time()
+                    && self.watch_time.lock().unwrap().reached_threshold(
+                        &work.session_id,
+                        &work.item_guid,
+                        active.prefetch_after_seconds,
+                        Instant::now(),
+                    );
+                if threshold_reached && active.accelerates_episode_cleanup() {
+                    self.store.note_episode_playback(&session.id, &current)?;
+                }
+                threshold_reached && active.auto_prefetch
             };
-            if eligible {
+            if prefetch {
                 for item in self
                     .next_episodes(
                         &session,
@@ -375,16 +394,52 @@ impl Engine {
         Ok(())
     }
 
+    async fn resolve_playback_season(&self, cursor: &mut usize) -> Result<()> {
+        if !self.policy.read().unwrap().accelerates_episode_cleanup() {
+            return Ok(());
+        }
+        let pending = self.store.unresolved_playback_seasons()?;
+        let Some((session_id, season_guid, season_number)) =
+            pending.get(*cursor % pending.len().max(1))
+        else {
+            return Ok(());
+        };
+        *cursor = cursor.wrapping_add(1);
+        let session = self.session(Some(session_id))?;
+        let Some(account) = session.account_key.as_deref() else {
+            return Ok(());
+        };
+        let season = self.catalog_item(&session, season_guid).await?;
+        if season.kind != "Season" || season.guid != *season_guid {
+            return Ok(());
+        }
+        let series = &season.parent_guid;
+        let mut seasons = self.catalog_children(&session, series, 1).await?.items;
+        seasons.retain(|item| {
+            item.kind == "Season"
+                && item.parent_guid == *series
+                && (1..=i64::MAX as u64).contains(&item.season_number)
+        });
+        if seasons
+            .iter()
+            .any(|item| item.guid == *season_guid && item.season_number == *season_number)
+        {
+            self.store
+                .remember_series_seasons(account, series, &seasons)?;
+        }
+        Ok(())
+    }
+
     pub fn cleanup_once(&self, at: i64) -> Result<usize> {
-        let policy = self.policy.read().unwrap().clone();
         // Finish a committed deletion after a crash even if the policy changed meanwhile.
         let mut candidates = self.store.pending_cleanup()?;
-        if policy.cleanup_enabled {
-            candidates.extend(self.store.cleanup_candidates(
-                at,
-                policy.retention_seconds,
-                policy.local_history,
-            )?);
+        {
+            let policy = self.policy.read().unwrap();
+            if policy.cleanup_enabled
+                && (policy.retention_seconds.is_some() || policy.accelerates_episode_cleanup())
+            {
+                candidates.extend(self.store.cleanup_candidates(at, &policy)?);
+            }
         }
         candidates.sort();
         candidates.dedup();
@@ -400,17 +455,14 @@ impl Engine {
                 continue;
             };
             let key = item.source.cache_id();
+            let policy = self.policy.read().unwrap();
             let uses = self.cache_uses.lock().unwrap();
             if uses.get(&key).copied().unwrap_or(0) > 0
-                || !self.store.begin_cleanup(
-                    &id,
-                    at,
-                    policy.retention_seconds,
-                    policy.local_history,
-                )?
+                || !self.store.begin_cleanup(&id, at, &policy)?
             {
                 continue;
             }
+            drop(policy);
             let mut files = vec![self.store.file(&id, false), self.store.file(&id, true)];
             for segment in self.store.segments(&key)? {
                 if segment.checksum.len() != 64
@@ -462,6 +514,7 @@ impl Engine {
     }
 
     pub async fn scheduler(self: Arc<Self>) {
+        let mut season_cursor = 0;
         let mut cursor = 0usize;
         let mut last_tick = Instant::now();
         let mut last_wall = now();
@@ -482,6 +535,13 @@ impl Engine {
             let _ = self.refresh_sessions().await;
             if let Err(_error) = self.process_playback().await {
                 crate::event!("playback scheduling deferred; metadata unavailable");
+            }
+            if self
+                .resolve_playback_season(&mut season_cursor)
+                .await
+                .is_err()
+            {
+                crate::event!("cross-season cleanup deferred; series metadata unavailable");
             }
             // Reconcile a bounded rotating set, including items whose completed record left play/list.
             if self.policy.read().unwrap().syncs_history()

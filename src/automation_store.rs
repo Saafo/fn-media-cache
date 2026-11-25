@@ -14,6 +14,35 @@ use crate::{
 type StoredManagedRow = (String, String, String, String, Option<i64>, bool, bool);
 type StoredSessionRow = (String, String, Option<String>, i64, Option<String>);
 
+// A shared file can only be deleted when all its catalog bindings are eligible.
+const CLEANUP_ELIGIBILITY: &str = "
+    GROUP BY media.download_id
+    HAVING MIN(CASE WHEN media.keep=0
+        AND ((media.completed_at<=?1 AND (NOT ?2 OR media.manual_completed=1)) OR (
+            ?3
+            AND json_extract(media.item_json,'$.kind')='Episode'
+            AND json_extract(media.item_json,'$.season_number')>0
+            AND json_extract(media.item_json,'$.episode_number')>0
+            AND EXISTS (
+                SELECT 1 FROM sessions
+                JOIN episode_playback ON episode_playback.account_key=sessions.account_key
+                LEFT JOIN season_series AS played ON played.account_key=sessions.account_key
+                    AND played.season_guid=episode_playback.season_guid
+                    AND played.season_number=episode_playback.season_number
+                LEFT JOIN season_series AS cached ON cached.account_key=sessions.account_key
+                    AND cached.season_guid=json_extract(media.item_json,'$.parent_guid')
+                    AND cached.season_number=json_extract(media.item_json,'$.season_number')
+                WHERE sessions.id=media.session_id
+                AND (
+                    (episode_playback.season_guid=json_extract(media.item_json,'$.parent_guid')
+                        AND episode_playback.season_number=json_extract(media.item_json,'$.season_number')
+                        AND episode_playback.episode_number>json_extract(media.item_json,'$.episode_number'))
+                    OR (played.series_guid=cached.series_guid AND played.season_number>cached.season_number)
+                )
+            )
+        ))
+        THEN 1 ELSE 0 END)=1";
+
 #[derive(Clone, Serialize)]
 pub struct ManagedMedia {
     pub session_id: String,
@@ -51,7 +80,13 @@ impl Store {
              CREATE TABLE IF NOT EXISTS prefetch_suppressions (
                 session_id TEXT NOT NULL, item_guid TEXT NOT NULL, PRIMARY KEY(session_id,item_guid));
              CREATE TABLE IF NOT EXISTS playback_work (session_id TEXT NOT NULL, item_guid TEXT NOT NULL,
-                seen_at INTEGER NOT NULL, PRIMARY KEY(session_id,item_guid));"
+                seen_at INTEGER NOT NULL, PRIMARY KEY(session_id,item_guid));
+             CREATE TABLE IF NOT EXISTS episode_playback (
+                account_key TEXT NOT NULL, season_guid TEXT NOT NULL, season_number INTEGER NOT NULL,
+                episode_number INTEGER NOT NULL, PRIMARY KEY(account_key,season_guid,season_number));
+             CREATE TABLE IF NOT EXISTS season_series (
+                account_key TEXT NOT NULL, season_guid TEXT NOT NULL, season_number INTEGER NOT NULL,
+                series_guid TEXT NOT NULL, PRIMARY KEY(account_key,season_guid,season_number));"
         )?;
         let db = self.db.lock().unwrap();
         let columns = db
@@ -159,7 +194,7 @@ impl Store {
             [serde_json::to_string(policy)?],
         )?;
         if clear_playback_work {
-            tx.execute("DELETE FROM playback_work", [])?;
+            tx.execute_batch("DELETE FROM playback_work; DELETE FROM episode_playback;")?;
         }
         tx.commit()?;
         Ok(())
@@ -335,15 +370,86 @@ impl Store {
         Ok(())
     }
 
-    pub fn cleanup_candidates(
+    pub fn note_episode_playback(&self, session_id: &str, item: &MediaItem) -> Result<()> {
+        if item.kind != "Episode"
+            || item.season_number == 0
+            || item.episode_number == 0
+            || !crate::library::valid_guid(&item.parent_guid)
+        {
+            return Ok(());
+        }
+        let (Ok(season), Ok(episode)) = (
+            i64::try_from(item.season_number),
+            i64::try_from(item.episode_number),
+        ) else {
+            return Ok(());
+        };
+        self.db.lock().unwrap().execute(
+            "INSERT INTO episode_playback(account_key,season_guid,season_number,episode_number)
+             SELECT account_key,?2,?3,?4 FROM sessions
+             WHERE id=?1 AND account_key IS NOT NULL AND error IS NOT 'authentication'
+             ON CONFLICT(account_key,season_guid,season_number) DO UPDATE SET episode_number=excluded.episode_number
+             WHERE excluded.episode_number>episode_playback.episode_number",
+            params![session_id, item.parent_guid, season, episode],
+        )?;
+        Ok(())
+    }
+
+    pub fn unresolved_playback_seasons(&self) -> Result<Vec<(String, String, u64)>> {
+        Ok(self
+            .db
+            .lock()
+            .unwrap()
+            .prepare(
+                "SELECT MIN(sessions.id), progress.season_guid, progress.season_number
+             FROM episode_playback AS progress JOIN sessions USING (account_key)
+             LEFT JOIN season_series USING (account_key, season_guid, season_number)
+             WHERE progress.season_number>1 AND season_series.series_guid IS NULL
+             AND sessions.error IS NOT 'authentication'
+             GROUP BY progress.account_key, progress.season_guid, progress.season_number
+             ORDER BY progress.account_key, progress.season_number, progress.season_guid",
+            )?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn remember_series_seasons(
         &self,
-        at: i64,
-        retention: u64,
-        manual_only: bool,
-    ) -> Result<Vec<String>> {
-        Ok(self.db.lock().unwrap().prepare("SELECT download_id FROM managed_media GROUP BY download_id
-            HAVING MIN(CASE WHEN keep=0 AND completed_at IS NOT NULL AND completed_at<=?1 AND (NOT ?2 OR manual_completed=1) THEN 1 ELSE 0 END)=1")?
-            .query_map(params![at.saturating_sub(retention as i64),manual_only],|r|r.get(0))?.collect::<rusqlite::Result<_>>()?)
+        account: &str,
+        series: &str,
+        seasons: &[MediaItem],
+    ) -> Result<()> {
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        for season in seasons {
+            tx.execute(
+                "INSERT INTO season_series(account_key,season_guid,season_number,series_guid)
+                 VALUES (?1,?2,?3,?4)
+                 ON CONFLICT DO UPDATE SET series_guid=excluded.series_guid",
+                params![account, season.guid, season.season_number, series],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn cleanup_candidates(&self, at: i64, policy: &Policy) -> Result<Vec<String>> {
+        let query =
+            format!("SELECT media.download_id FROM managed_media AS media {CLEANUP_ELIGIBILITY}");
+        Ok(self
+            .db
+            .lock()
+            .unwrap()
+            .prepare(&query)?
+            .query_map(
+                params![
+                    policy.retention_cutoff(at),
+                    policy.local_history,
+                    policy.accelerates_episode_cleanup(),
+                ],
+                |r| r.get(0),
+            )?
+            .collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn pending_cleanup(&self) -> Result<Vec<String>> {
@@ -356,13 +462,7 @@ impl Store {
             .collect::<rusqlite::Result<_>>()?)
     }
 
-    pub fn begin_cleanup(
-        &self,
-        download: &str,
-        at: i64,
-        retention: u64,
-        manual_only: bool,
-    ) -> Result<bool> {
+    pub fn begin_cleanup(&self, download: &str, at: i64, policy: &Policy) -> Result<bool> {
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction()?;
         let pending: bool = tx
@@ -376,8 +476,26 @@ impl Store {
         if pending {
             return Ok(true);
         }
-        let blocked: i64 = tx.query_row("SELECT COUNT(*) FROM managed_media WHERE download_id=?1 AND (keep=1 OR completed_at IS NULL OR completed_at>?2 OR (?3 AND manual_completed IS NOT 1))", params![download,at.saturating_sub(retention as i64),manual_only],|r|r.get(0))?;
-        if blocked > 0 {
+        if !policy.cleanup_enabled {
+            return Ok(false);
+        }
+        let query = format!(
+            "SELECT 1 FROM managed_media AS media WHERE media.download_id=?4 {CLEANUP_ELIGIBILITY}"
+        );
+        let eligible = tx
+            .query_row(
+                &query,
+                params![
+                    policy.retention_cutoff(at),
+                    policy.local_history,
+                    policy.accelerates_episode_cleanup(),
+                    download,
+                ],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !eligible {
             return Ok(false);
         }
         let changed = tx.execute("UPDATE downloads SET state='deleting' WHERE id=?1 AND state IN ('complete','paused','failed','waiting_space','deleting')",[download])?;

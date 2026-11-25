@@ -386,6 +386,8 @@ async fn automation(State(engine): State<Arc<Engine>>) -> ApiResult<serde_json::
         "playing": engine.playing(),
         "downloads_yielding": engine.downloads_yielding(),
         "prevent_idle_sleep_supported": crate::power::SUPPORTED,
+        "cross_season_cleanup_supported": true,
+        "optional_retention_supported": true,
         "cache_limit_bytes": engine.cache_limit()
     })))
 }
@@ -424,8 +426,8 @@ async fn save_policy(
         if clear || !policy.prevent_idle_sleep {
             engine.power.clear_reports();
         }
-        if clear || !policy.auto_prefetch {
-            *engine.prefetch_watch.lock().unwrap() = Default::default();
+        if clear || !policy.tracks_watch_time() {
+            *engine.watch_time.lock().unwrap() = Default::default();
         }
         if policy.incognito {
             engine.observations.lock().unwrap().clear();

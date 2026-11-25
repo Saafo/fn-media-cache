@@ -380,16 +380,18 @@ pub async fn handle(
     {
         return store_error();
     }
-    if (policy.auto_prefetch || policy.prevent_idle_sleep)
+    if (policy.tracks_watch_time() || policy.prevent_idle_sleep)
         && let Ok(Some(session)) = engine.store.save_session(source)
     {
         engine.report_playback(&session.id, &item, position, peer, received_at, &policy);
-        if engine.prefetch_watch.lock().unwrap().eligible(
-            &session.id,
-            &item,
-            &policy,
-            Instant::now(),
-        ) {
+        if policy.tracks_watch_time()
+            && engine.watch_time.lock().unwrap().reached_threshold(
+                &session.id,
+                &item,
+                policy.prefetch_after_seconds,
+                Instant::now(),
+            )
+        {
             let _ = engine.store.note_playback(&session.id, &item);
             engine.scheduler_wake.notify_one();
         }

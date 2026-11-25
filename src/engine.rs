@@ -69,7 +69,7 @@ pub struct Engine {
     pub counters: Counters,
     pub transfers: Arc<crate::transfers::Transfers>,
     pub power: crate::power::Activity,
-    pub prefetch_watch: Mutex<crate::prefetch::WatchTime>,
+    pub watch_time: Mutex<crate::prefetch::WatchTime>,
     pub wake: Notify,
     pub shutdown: CancellationToken,
     pub probe_lock: tokio::sync::Mutex<()>,
@@ -123,7 +123,7 @@ impl Engine {
             counters: Counters::default(),
             transfers: Arc::new(crate::transfers::Transfers::default()),
             power: Default::default(),
-            prefetch_watch: Mutex::new(Default::default()),
+            watch_time: Mutex::new(Default::default()),
             wake: Notify::new(),
             shutdown: CancellationToken::new(),
             probe_lock: tokio::sync::Mutex::new(()),
@@ -239,8 +239,8 @@ impl Engine {
         received_at: Instant,
         policy: &Policy,
     ) {
-        if policy.auto_prefetch {
-            self.prefetch_watch
+        if policy.tracks_watch_time() {
+            self.watch_time
                 .lock()
                 .unwrap()
                 .report(session, peer, item, position, received_at);

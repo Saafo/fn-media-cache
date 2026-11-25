@@ -288,7 +288,7 @@ impl Engine {
         fntv::file_version(&self.client, &source).await?;
         let policy = self.policy.read().unwrap();
         if let Some(current) = prefetch_from
-            && !self.prefetch_watch.lock().unwrap().eligible(
+            && !self.watch_time.lock().unwrap().eligible(
                 &session.id,
                 current,
                 &policy,

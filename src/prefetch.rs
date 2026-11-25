@@ -73,13 +73,17 @@ impl WatchTime {
     pub fn eligible(&self, session: &str, item: &str, policy: &Policy, now: Instant) -> bool {
         policy.auto_prefetch
             && !policy.incognito
-            && (policy.prefetch_after_seconds == 0
-                || self.watches.iter().any(|((id, _), watch)| {
-                    id == session
-                        && watch.item == item
-                        && watch.seconds >= policy.prefetch_after_seconds as f64
-                        && now.saturating_duration_since(watch.last_advance) <= MAX_REPORT_GAP
-                }))
+            && self.reached_threshold(session, item, policy.prefetch_after_seconds, now)
+    }
+
+    pub fn reached_threshold(&self, session: &str, item: &str, seconds: u64, now: Instant) -> bool {
+        seconds == 0
+            || self.watches.iter().any(|((id, _), watch)| {
+                id == session
+                    && watch.item == item
+                    && watch.seconds >= seconds as f64
+                    && now.saturating_duration_since(watch.last_advance) <= MAX_REPORT_GAP
+            })
     }
 }
 
