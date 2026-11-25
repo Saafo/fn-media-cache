@@ -246,6 +246,11 @@ details summary { cursor: pointer; }
   .download-statuses { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 
+.overlay-titlebar { position: relative; --titlebar-height: 32px; }
+.overlay-titlebar .sidebar { padding-top: calc(var(--titlebar-height) + 16px); }
+.overlay-titlebar main { padding-top: calc(var(--titlebar-height) + 17px); }
+.window-drag-region { position: absolute; z-index: 3; inset: 0 0 auto 84px; height: var(--titlebar-height); }
+
 .table-tools.page-head, .catalog-header.panel-head { margin-bottom: 0; }
 .align-end { text-align: right; }
 .settings-group { margin-top: 15px; }

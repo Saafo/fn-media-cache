@@ -188,6 +188,7 @@ interface DesktopCalls {
 declare global {
   interface Window {
     __TAURI__?: { core: { invoke: <T>(command: string, args?: Record<string, unknown>) => Promise<T> } }
+    __FN_MEDIA_CACHE_OVERLAY__?: boolean
   }
 }
 
@@ -195,6 +196,7 @@ const bridge = window.__TAURI__?.core
 let token = ''
 
 export const isDesktop = Boolean(bridge)
+export const hasOverlayTitlebar = isDesktop && window.__FN_MEDIA_CACHE_OVERLAY__ === true
 
 export function storeToken(value: string) {
   token = value

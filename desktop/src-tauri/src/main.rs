@@ -81,7 +81,27 @@ async fn sync_sleep_menu(
 }
 
 fn main() {
-    let application = tauri::Builder::default()
+    let context = tauri::generate_context!();
+    let builder = tauri::Builder::default();
+    #[cfg(target_os = "macos")]
+    let (context, builder) = {
+        let mut context = context;
+        let window = context
+            .config_mut()
+            .app
+            .windows
+            .iter_mut()
+            .find(|window| window.label == "main")
+            .expect("main window configuration");
+        window.title_bar_style = tauri::TitleBarStyle::Overlay;
+        window.hidden_title = true;
+        (
+            context,
+            builder
+                .append_invoke_initialization_script("window.__FN_MEDIA_CACHE_OVERLAY__ = true;"),
+        )
+    };
+    let application = builder
         .invoke_handler(tauri::generate_handler![
             service_status,
             save_server,
@@ -184,7 +204,7 @@ fn main() {
                 let _ = window.hide();
             }
         })
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("desktop application failed");
     let shutdown_complete = Arc::new(AtomicBool::new(false));
     application.run(move |app, event| match event {

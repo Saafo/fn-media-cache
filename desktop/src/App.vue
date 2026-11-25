@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef } from 'vue'
-import { ApiError, desktopCall, errorText, get, isDesktop, storeToken } from './api'
+import { ApiError, desktopCall, errorText, get, hasOverlayTitlebar, isDesktop, storeToken } from './api'
 import type { DesktopStatus, Snapshot } from './api'
 import DownloadsView from './DownloadsView.vue'
 import OverviewView from './OverviewView.vue'
@@ -135,7 +135,8 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="shell">
+  <div class="shell" :class="{ 'overlay-titlebar': hasOverlayTitlebar }">
+    <div v-if="hasOverlayTitlebar" class="window-drag-region" data-tauri-drag-region aria-hidden="true"></div>
     <aside class="sidebar">
       <div class="brand">FN Media Cache</div>
       <nav aria-label="主导航">

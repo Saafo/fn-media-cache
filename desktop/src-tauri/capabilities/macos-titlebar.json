@@ -1,0 +1,6 @@
+{
+  "identifier": "macos-titlebar",
+  "windows": ["main"],
+  "platforms": ["macOS"],
+  "permissions": ["core:window:allow-start-dragging", "core:window:allow-internal-toggle-maximize"]
+}
